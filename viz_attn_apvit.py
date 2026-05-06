@@ -9,10 +9,21 @@ import matplotlib.pyplot as plt
 import torch
 import numpy as np
 import cv2
+import os
 from samples.CLS2IDX import CLS2IDX
 
 from baselines.ViT.ViT_LRP import deit_base_patch16_224 as vit_LRP
 from baselines.ViT.ViT_explanation_generator import LRP
+
+choose_model = 'deit'  # 'deit' / 'apvit'
+
+home_pth = '/home/projects/bagon/ilanaveh/code'
+
+deit_cp_pth = os.path.join(home_pth, 'Transformers/deit/out/jobs_after_adding_seed')
+deit_model_name = 'deit_blur0_BS128'
+
+apvit_cp_pth = os.path.join(home_pth, 'Transformers/APViT/work_dirs')
+apvit_model_name = 'RAF_blur0'
 
 normalize = transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
 transform = transforms.Compose([
@@ -34,6 +45,35 @@ def show_cam_on_image(img, mask):
 # initialize ViT pretrained with DeiT
 model = vit_LRP(pretrained=True).cuda()
 model.eval()
+
+# Load local checkpoint:
+if choose_model == 'deit':
+    deit_cp = torch.load(os.path.join(deit_cp_pth, deit_model_name, 'best_checkpoint.pth'))
+    model.load_state_dict(deit_cp['model'])
+elif choose_model == 'apvit':
+    apvit_cp = torch.load(os.path.join(apvit_cp_pth, apvit_model_name, 'epoch_40.pth'))
+    apvit_deit_cp = {}
+    #     k.removeprefix("vit."): v
+    #     for k, v in apvit_cp['state_dict'].items()
+    #     if k.startswith("vit.")
+    # }
+    for k, v in apvit_cp['state_dict'].items():
+        if not k.startswith("vit."):
+            continue
+        new_key = k.removeprefix("vit.")
+        if new_key in {"cls_pos_embed", "patch_pos_embed"}:
+            continue
+        apvit_deit_cp[new_key] = v
+
+    apvit_deit_cp["pos_embed"] = torch.cat(
+        [
+            apvit_cp['state_dict']["vit.cls_pos_embed"],
+            apvit_cp['state_dict']["vit.patch_pos_embed"],
+        ],
+        dim=1,
+    )
+    missing, unexpected = model.load_state_dict(apvit_deit_cp, strict=False)
+
 attribution_generator = LRP(model)
 
 
