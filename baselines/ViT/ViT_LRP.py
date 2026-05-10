@@ -435,3 +435,45 @@ def deit_base_patch16_224(pretrained=False, **kwargs):
         )
         model.load_state_dict(checkpoint["model"])
     return model
+
+
+class APViT_LRP(VisionTransformer):
+    def __init__(self, embed_dim, in_channels, **kwargs):
+        super().__init__(embed_dim=embed_dim, **kwargs)
+        self.projs = nn.ModuleList([nn.Conv2d(in_channels, embed_dim, 1,)])
+
+    def forward(self, x):
+        x = x[0]
+        B = x.shape[0]
+
+        # x = self.patch_embed(x)
+        x = self.projs[0](x)
+        x = x.flatten(2).transpose(1, 2)  # [B, D, H, W] -> [B, H*W, D]
+
+        cls_tokens = self.cls_token.expand(B, -1, -1)  # stole cls_tokens impl from Phil Wang, thanks
+        x = torch.cat((cls_tokens, x), dim=1)
+        x = self.add([x, self.pos_embed])
+
+        x.register_hook(self.save_inp_grad)
+
+        for blk in self.blocks:
+            x = blk(x)
+
+        x = self.norm(x)
+        x = self.pool(x, dim=1, indices=torch.tensor(0, device=x.device))
+        x = x.squeeze(1)
+        x = self.head(x)
+        return x
+
+
+def deit_base_patch16_224_apvit(pretrained=False, **kwargs):
+    model = APViT_LRP(
+        in_channels=256, patch_size=16, embed_dim=768, depth=12, num_heads=12, mlp_ratio=4, qkv_bias=True, **kwargs)
+    model.default_cfg = _cfg()
+    if pretrained:
+        checkpoint = torch.hub.load_state_dict_from_url(
+            url="https://dl.fbaipublicfiles.com/deit/deit_base_patch16_224-b5f2ef4d.pth",
+            map_location="cpu", check_hash=True
+        )
+        model.load_state_dict(checkpoint["model"])
+    return model
