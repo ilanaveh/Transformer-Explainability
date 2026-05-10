@@ -17,13 +17,14 @@ from samples.CLS2IDX import CLS2IDX, CLS2IDX_RAFDB
 from baselines.ViT.ViT_LRP import deit_base_patch16_224 as vit_LRP
 from baselines.ViT.ViT_LRP import deit_base_patch16_224_apvit as apvit_LRP
 from baselines.ViT.ViT_explanation_generator import LRP
-from modules.layers_apvit import LinearClsHeadLRP
+from PIL import ImageFilter  # for GaussianBlur
 
 import sys
 sys.path.insert(0, "/home/projects/bagon/ilanaveh/code/Transformers/APViT")
 from mmcls.models.classifiers.pool_vit import PoolingVitClassifier
 
 choose_model = 'apvit'  # 'deit' / 'apvit'
+test_blur = 8
 
 home_pth = '/home/projects/bagon/ilanaveh/code'
 
@@ -31,7 +32,7 @@ deit_cp_pth = os.path.join(home_pth, 'Transformers/deit/out/jobs_after_adding_se
 deit_model_name = 'deit_blur0_BS128'
 
 apvit_cp_pth = os.path.join(home_pth, 'Transformers/APViT/work_dirs')
-apvit_model_name = 'RAF_blur0'
+apvit_model_name = 'RAF_blur8_pretrained0-8'
 
 if choose_model == 'deit':
     im_size = 224
@@ -43,12 +44,44 @@ elif choose_model == 'apvit':
     im_nm = 'test_0038_112.jpg'
     sf = 8
 
+
+class GaussianBlur(object):
+    """
+    Apply Gaussian blur filter with the given sigma to the input PIL Image.
+    Args:
+        sigma (int): Desired Gaussian blur level sigma
+    Taken from: W:\dannyh\work\code\PyTorch\vggface2_lookdir\datasets\custom_transforms.
+   """
+
+    def __init__(self, sigma):
+        assert isinstance(sigma, int)
+        self.sigma = sigma
+
+    def __call__(self, img):
+        """
+        Args:
+            img (PIL Image): Image to be scaled.
+        Returns:
+            PIL Image: Rescaled image.
+        """
+        img = img.filter(ImageFilter.GaussianBlur(
+            radius=self.sigma))
+
+        return img
+
+    def __repr__(self):
+        return self.__class__.__name__ + '(sigma={0})'.format(self.sigma)
+
+
 normalize = transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
 transform = transforms.Compose([
     transforms.Resize((im_size, im_size)),
     transforms.ToTensor(),
     normalize,
 ])
+
+if test_blur:
+    transform = transforms.Compose([GaussianBlur(test_blur)] + transform.transforms)
 
 
 class IdentityHeadWithSimpleTest(nn.Module):
@@ -80,8 +113,6 @@ elif choose_model == 'apvit':
         args = json.load(f)
     args['head']['topk'] = (1, )  #
     model = PoolingVitClassifier(**args)
-    # head_type = args['head'].pop('type')
-    # model.head = LinearClsHeadLRP(**args['head'])
     model.head = IdentityHeadWithSimpleTest()
     model.vit = apvit_LRP(pretrained=False, num_classes=7)
     model = model.cuda()
@@ -169,8 +200,8 @@ elif choose_model == 'apvit':
     dog = generate_visualization(dog_cat_image, return_loss=False)
     sad = generate_visualization(dog_cat_image, class_index=3, return_loss=False)
 
-axs[0].imshow(image);
-axs[0].axis('off');
+axs[0].imshow(image)
+axs[0].axis('off')
 axs[1].imshow(dog)
 axs[1].axis('off')
 
