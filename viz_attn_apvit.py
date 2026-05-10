@@ -5,15 +5,23 @@ Based on DeiT_example.ipynb.
 
 from PIL import Image
 import torchvision.transforms as transforms
+import torch.nn as nn
 import matplotlib.pyplot as plt
 import torch
 import numpy as np
 import cv2
 import os
-from samples.CLS2IDX import CLS2IDX
+import json
+from samples.CLS2IDX import CLS2IDX, CLS2IDX_RAFDB
 
 from baselines.ViT.ViT_LRP import deit_base_patch16_224 as vit_LRP
+from baselines.ViT.ViT_LRP import deit_base_patch16_224_apvit as apvit_LRP
 from baselines.ViT.ViT_explanation_generator import LRP
+from modules.layers_apvit import LinearClsHeadLRP
+
+import sys
+sys.path.insert(0, "/home/projects/bagon/ilanaveh/code/Transformers/APViT")
+from mmcls.models.classifiers.pool_vit import PoolingVitClassifier
 
 choose_model = 'deit'  # 'deit' / 'apvit'
 
@@ -23,11 +31,20 @@ deit_cp_pth = os.path.join(home_pth, 'Transformers/deit/out/jobs_after_adding_se
 deit_model_name = 'deit_blur0_BS128'
 
 apvit_cp_pth = os.path.join(home_pth, 'Transformers/APViT/work_dirs')
-apvit_model_name = 'RAF_blur0'
+apvit_model_name = 'RAF_blur0-8'
+
+if choose_model == 'deit':
+    im_size = 224
+    im_nm = 'catdog.png'
+    sf = 16
+elif choose_model == 'apvit':
+    im_size = 112
+    # im_nm = 'catdog_112.png'
+    sf = 8
 
 normalize = transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
 transform = transforms.Compose([
-    transforms.Resize((224, 224)),
+    transforms.Resize((im_size, im_size)),
     transforms.ToTensor(),
     normalize,
 ])
@@ -43,47 +60,46 @@ def show_cam_on_image(img, mask):
 
 
 # initialize ViT pretrained with DeiT
-model = vit_LRP(pretrained=True).cuda()
-model.eval()
 
 # Load local checkpoint:
 if choose_model == 'deit':
+    model = vit_LRP(pretrained=True).cuda()
     deit_cp = torch.load(os.path.join(deit_cp_pth, deit_model_name, 'best_checkpoint.pth'))
     model.load_state_dict(deit_cp['model'])
-elif choose_model == 'apvit':
-    apvit_cp = torch.load(os.path.join(apvit_cp_pth, apvit_model_name, 'epoch_40.pth'))
-    apvit_deit_cp = {}
-    #     k.removeprefix("vit."): v
-    #     for k, v in apvit_cp['state_dict'].items()
-    #     if k.startswith("vit.")
-    # }
-    for k, v in apvit_cp['state_dict'].items():
-        if not k.startswith("vit."):
-            continue
-        new_key = k.removeprefix("vit.")
-        if new_key in {"cls_pos_embed", "patch_pos_embed"}:
-            continue
-        apvit_deit_cp[new_key] = v
 
-    apvit_deit_cp["pos_embed"] = torch.cat(
-        [
-            apvit_cp['state_dict']["vit.cls_pos_embed"],
-            apvit_cp['state_dict']["vit.patch_pos_embed"],
-        ],
+elif choose_model == 'apvit':
+    with open(os.path.join(home_pth, 'Transformers/APViT/args_for_build_mdl.json'), 'r') as f:
+        args = json.load(f)
+    args['head']['topk'] = (1, )  #
+    model = PoolingVitClassifier(**args)
+    # head_type = args['head'].pop('type')
+    # model.head = LinearClsHeadLRP(**args['head'])
+    model.head = nn.Identity()
+    model.vit = apvit_LRP(pretrained=False, num_classes=7)
+    model = model.cuda()
+    apvit_cp = torch.load(os.path.join(apvit_cp_pth, apvit_model_name, 'epoch_40.pth'))['state_dict']
+    apvit_cp["vit.pos_embed"] = torch.cat(
+        [apvit_cp.pop("vit.cls_pos_embed"), apvit_cp.pop("vit.patch_pos_embed")],
         dim=1,
     )
-    missing, unexpected = model.load_state_dict(apvit_deit_cp, strict=False)
+    apvit_cp["vit.head.weight"] = apvit_cp.pop("head.fc.weight")
+    apvit_cp["vit.head.bias"] = apvit_cp.pop("head.fc.bias")
+    missing, unexpected = model.load_state_dict(apvit_cp, strict=False)
+    assert((missing == ['vit.patch_embed.proj.weight', 'vit.patch_embed.proj.bias']) and not unexpected)
+
+model.eval()
 
 attribution_generator = LRP(model)
 
 
-def generate_visualization(original_image, class_index=None):
+def generate_visualization(original_image, class_index=None, return_loss=None):
     transformer_attribution = attribution_generator.generate_LRP(original_image.unsqueeze(0).cuda(),
                                                                  method="transformer_attribution",
-                                                                 index=class_index).detach()
+                                                                 index=class_index,
+                                                                 return_loss=return_loss).detach()
     transformer_attribution = transformer_attribution.reshape(1, 1, 14, 14)
-    transformer_attribution = torch.nn.functional.interpolate(transformer_attribution, scale_factor=16, mode='bilinear')
-    transformer_attribution = transformer_attribution.reshape(224, 224).cuda().data.cpu().numpy()
+    transformer_attribution = torch.nn.functional.interpolate(transformer_attribution, scale_factor=sf, mode='bilinear')
+    transformer_attribution = transformer_attribution.reshape(im_size, im_size).cuda().data.cpu().numpy()
     transformer_attribution = (transformer_attribution - transformer_attribution.min()) / (
                 transformer_attribution.max() - transformer_attribution.min())
     image_transformer_attribution = original_image.permute(1, 2, 0).data.cpu().numpy()
@@ -97,6 +113,8 @@ def generate_visualization(original_image, class_index=None):
 
 def print_top_classes(predictions, **kwargs):
     # Print Top-5 predictions
+    if not torch.is_tensor(predictions):
+        predictions = torch.tensor(predictions)
     prob = torch.softmax(predictions, dim=1)
     class_indices = predictions.data.topk(5, dim=1)[1][0].tolist()
     max_str_len = 0
@@ -114,25 +132,34 @@ def print_top_classes(predictions, **kwargs):
         print(output_string)
 
 
-image = Image.open('samples/catdog.png')
+image = Image.open(f'samples/{im_nm}')
 dog_cat_image = transform(image)
 
 fig, axs = plt.subplots(1, 3)
 axs[0].imshow(image);
 axs[0].axis('off');
 
-output = model(dog_cat_image.unsqueeze(0).cuda())
+if choose_model == 'deit':
+    output = model(dog_cat_image.unsqueeze(0).cuda())
+elif choose_model == 'apvit':
+    output = model(dog_cat_image.unsqueeze(0).cuda(), return_loss=False)
 print_top_classes(output)
 
 # dog
 # generate visualization for class 243: 'bull mastiff' - the predicted class
-dog = generate_visualization(dog_cat_image)
+if choose_model == 'deit':
+    dog = generate_visualization(dog_cat_image)
+elif choose_model == 'apvit':
+    dog = generate_visualization(dog_cat_image, return_loss=False)
+
 
 # cat - generate visualization for class 282 : 'tiger cat'
-cat = generate_visualization(dog_cat_image, class_index=282)
+cat = generate_visualization(dog_cat_image, class_index=282, return_loss=False)
 
 
 axs[1].imshow(dog);
 axs[1].axis('off');
 axs[2].imshow(cat);
 axs[2].axis('off');
+
+plt.show(block=True)
