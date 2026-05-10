@@ -23,7 +23,7 @@ import sys
 sys.path.insert(0, "/home/projects/bagon/ilanaveh/code/Transformers/APViT")
 from mmcls.models.classifiers.pool_vit import PoolingVitClassifier
 
-choose_model = 'deit'  # 'deit' / 'apvit'
+choose_model = 'apvit'  # 'deit' / 'apvit'
 
 home_pth = '/home/projects/bagon/ilanaveh/code'
 
@@ -40,6 +40,7 @@ if choose_model == 'deit':
 elif choose_model == 'apvit':
     im_size = 112
     # im_nm = 'catdog_112.png'
+    im_nm = 'test_0038_112.jpg'
     sf = 8
 
 normalize = transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
@@ -116,8 +117,9 @@ def generate_visualization(original_image, class_index=None, return_loss=None):
     return vis
 
 
-def print_top_classes(predictions, **kwargs):
+def print_top_classes(predictions, dataset='imagenet', **kwargs):
     # Print Top-5 predictions
+    cls2idx = CLS2IDX if (dataset=='imagenet') else CLS2IDX_RAFDB
     if not torch.is_tensor(predictions):
         predictions = torch.tensor(predictions)
     prob = torch.softmax(predictions, dim=1)
@@ -125,9 +127,9 @@ def print_top_classes(predictions, **kwargs):
     max_str_len = 0
     class_names = []
     for cls_idx in class_indices:
-        class_names.append(CLS2IDX[cls_idx])
-        if len(CLS2IDX[cls_idx]) > max_str_len:
-            max_str_len = len(CLS2IDX[cls_idx])
+        class_names.append(cls2idx[cls_idx])
+        if len(cls2idx[cls_idx]) > max_str_len:
+            max_str_len = len(cls2idx[cls_idx])
 
     print('Top 5 classes:')
     for cls_idx in class_indices:
@@ -146,9 +148,10 @@ axs[0].axis('off');
 
 if choose_model == 'deit':
     output = model(dog_cat_image.unsqueeze(0).cuda())
+    print_top_classes(output)
 elif choose_model == 'apvit':
     output = model(dog_cat_image.unsqueeze(0).cuda(), return_loss=False)
-print_top_classes(output)
+    print_top_classes(output, 'raf')
 
 # dog
 # generate visualization for class 243: 'bull mastiff' - the predicted class
