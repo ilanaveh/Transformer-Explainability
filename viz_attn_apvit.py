@@ -93,10 +93,15 @@ attribution_generator = LRP(model)
 
 
 def generate_visualization(original_image, class_index=None, return_loss=None):
-    transformer_attribution = attribution_generator.generate_LRP(original_image.unsqueeze(0).cuda(),
-                                                                 method="transformer_attribution",
-                                                                 index=class_index,
-                                                                 return_loss=return_loss).detach()
+    if return_loss:
+        transformer_attribution = attribution_generator.generate_LRP(original_image.unsqueeze(0).cuda(),
+                                                                     method="transformer_attribution",
+                                                                     index=class_index,
+                                                                     return_loss=return_loss).detach()
+    else:
+        transformer_attribution = attribution_generator.generate_LRP(original_image.unsqueeze(0).cuda(),
+                                                                     method="transformer_attribution",
+                                                                     index=class_index).detach()
     transformer_attribution = transformer_attribution.reshape(1, 1, 14, 14)
     transformer_attribution = torch.nn.functional.interpolate(transformer_attribution, scale_factor=sf, mode='bilinear')
     transformer_attribution = transformer_attribution.reshape(im_size, im_size).cuda().data.cpu().numpy()
@@ -149,17 +154,14 @@ print_top_classes(output)
 # generate visualization for class 243: 'bull mastiff' - the predicted class
 if choose_model == 'deit':
     dog = generate_visualization(dog_cat_image)
+    cat = generate_visualization(dog_cat_image, class_index=282)
+    axs[2].imshow(cat);
+    axs[2].axis('off');
 elif choose_model == 'apvit':
     dog = generate_visualization(dog_cat_image, return_loss=False)
+    cat = generate_visualization(dog_cat_image, class_index=282, return_loss=False)
 
-
-# cat - generate visualization for class 282 : 'tiger cat'
-cat = generate_visualization(dog_cat_image, class_index=282, return_loss=False)
-
-
-axs[1].imshow(dog);
-axs[1].axis('off');
-axs[2].imshow(cat);
-axs[2].axis('off');
+axs[1].imshow(dog)
+axs[1].axis('off')
 
 plt.show(block=True)
