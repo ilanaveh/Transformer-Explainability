@@ -31,7 +31,7 @@ deit_cp_pth = os.path.join(home_pth, 'Transformers/deit/out/jobs_after_adding_se
 deit_model_name = 'deit_blur0_BS128'
 
 apvit_cp_pth = os.path.join(home_pth, 'Transformers/APViT/work_dirs')
-apvit_model_name = 'RAF_blur0-8'
+apvit_model_name = 'RAF_blur0'
 
 if choose_model == 'deit':
     im_size = 224
@@ -50,6 +50,13 @@ transform = transforms.Compose([
     normalize,
 ])
 
+
+class IdentityHeadWithSimpleTest(nn.Module):
+    def forward(self, x, *args, **kwargs):
+        return x
+
+    def simple_test(self, x, *args, **kwargs):
+        return x
 
 # create heatmap from mask on image
 def show_cam_on_image(img, mask):
@@ -75,7 +82,7 @@ elif choose_model == 'apvit':
     model = PoolingVitClassifier(**args)
     # head_type = args['head'].pop('type')
     # model.head = LinearClsHeadLRP(**args['head'])
-    model.head = nn.Identity()
+    model.head = IdentityHeadWithSimpleTest()
     model.vit = apvit_LRP(pretrained=False, num_classes=7)
     model = model.cuda()
     apvit_cp = torch.load(os.path.join(apvit_cp_pth, apvit_model_name, 'epoch_40.pth'))['state_dict']
@@ -94,7 +101,7 @@ attribution_generator = LRP(model)
 
 
 def generate_visualization(original_image, class_index=None, return_loss=None):
-    if return_loss:
+    if return_loss is not None:
         transformer_attribution = attribution_generator.generate_LRP(original_image.unsqueeze(0).cuda(),
                                                                      method="transformer_attribution",
                                                                      index=class_index,
@@ -133,18 +140,14 @@ def print_top_classes(predictions, dataset='imagenet', **kwargs):
 
     print('Top 5 classes:')
     for cls_idx in class_indices:
-        output_string = '\t{} : {}'.format(cls_idx, CLS2IDX[cls_idx])
-        output_string += ' ' * (max_str_len - len(CLS2IDX[cls_idx])) + '\t\t'
+        output_string = '\t{} : {}'.format(cls_idx, cls2idx[cls_idx])
+        output_string += ' ' * (max_str_len - len(cls2idx[cls_idx])) + '\t\t'
         output_string += 'value = {:.3f}\t prob = {:.1f}%'.format(predictions[0, cls_idx], 100 * prob[0, cls_idx])
         print(output_string)
 
 
 image = Image.open(f'samples/{im_nm}')
 dog_cat_image = transform(image)
-
-fig, axs = plt.subplots(1, 3)
-axs[0].imshow(image);
-axs[0].axis('off');
 
 if choose_model == 'deit':
     output = model(dog_cat_image.unsqueeze(0).cuda())
@@ -156,14 +159,18 @@ elif choose_model == 'apvit':
 # dog
 # generate visualization for class 243: 'bull mastiff' - the predicted class
 if choose_model == 'deit':
+    fig, axs = plt.subplots(1, 3)
     dog = generate_visualization(dog_cat_image)
     cat = generate_visualization(dog_cat_image, class_index=282)
-    axs[2].imshow(cat);
-    axs[2].axis('off');
+    axs[2].imshow(cat)
+    axs[2].axis('off')
 elif choose_model == 'apvit':
+    fig, axs = plt.subplots(1, 2)
     dog = generate_visualization(dog_cat_image, return_loss=False)
-    cat = generate_visualization(dog_cat_image, class_index=282, return_loss=False)
+    sad = generate_visualization(dog_cat_image, class_index=3, return_loss=False)
 
+axs[0].imshow(image);
+axs[0].axis('off');
 axs[1].imshow(dog)
 axs[1].axis('off')
 
