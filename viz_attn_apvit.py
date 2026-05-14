@@ -20,6 +20,7 @@ from baselines.ViT.ViT_explanation_generator import LRP
 from PIL import ImageFilter  # for GaussianBlur
 
 import sys
+
 sys.path.insert(0, "/home/projects/bagon/ilanaveh/code/Transformers/APViT")
 from mmcls.models.classifiers.pool_vit import PoolingVitClassifier
 
@@ -32,17 +33,35 @@ deit_cp_pth = os.path.join(home_pth, 'Transformers/deit/out/jobs_after_adding_se
 deit_model_name = 'deit_blur0_BS128'
 
 apvit_cp_pth = os.path.join(home_pth, 'Transformers/APViT/work_dirs')
-apvit_model_name = 'RAF_blur8_pretrained0-8'
+apvit_model_name = 'RAF_blur8_freeze'
+# apvit_model_name = 'RAF_blur8_pretrained0-8_freeze_fix_projs'
 
 if choose_model == 'deit':
     im_size = 224
     im_nm = 'catdog.png'
     sf = 16
+    normalize = transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+
 elif choose_model == 'apvit':
     im_size = 112
     # im_nm = 'catdog_112.png'
-    im_nm = 'test_0038_112.jpg'
+    # im_nm = 'test_0038_112.jpg'
+    # im_nm = 'test_1261.jpg'
+    im_nm = 'test_0411.jpg'
+    im_nm = 'test_0189.jpg'
+    # im_nm = 'test_1697_112.jpg'
     sf = 8
+    # normalize = transforms.Normalize(mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375])
+    normalize = transforms.Normalize(mean=[.485, .456, .406], std=[.229, .224, .225])
+
+img_lbl_dict = {
+    'test_0038_112.jpg': 4,
+    'test_1261_112.jpg': 5,
+    'test_1697_112.jpg': 4,
+    'test_1261.jpg': 5,
+    'test_0411.jpg': 4,
+    'test_0189.jpg': 5,
+}
 
 
 class GaussianBlur(object):
@@ -73,7 +92,6 @@ class GaussianBlur(object):
         return self.__class__.__name__ + '(sigma={0})'.format(self.sigma)
 
 
-normalize = transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
 transform = transforms.Compose([
     transforms.Resize((im_size, im_size)),
     transforms.ToTensor(),
@@ -90,6 +108,7 @@ class IdentityHeadWithSimpleTest(nn.Module):
 
     def simple_test(self, x, *args, **kwargs):
         return x
+
 
 # create heatmap from mask on image
 def show_cam_on_image(img, mask):
@@ -111,7 +130,7 @@ if choose_model == 'deit':
 elif choose_model == 'apvit':
     with open(os.path.join(home_pth, 'Transformers/APViT/args_for_build_mdl.json'), 'r') as f:
         args = json.load(f)
-    args['head']['topk'] = (1, )  #
+    args['head']['topk'] = (1,)  #
     model = PoolingVitClassifier(**args)
     model.head = IdentityHeadWithSimpleTest()
     model.vit = apvit_LRP(pretrained=False, num_classes=7)
@@ -145,10 +164,10 @@ def generate_visualization(original_image, class_index=None, return_loss=None):
     transformer_attribution = torch.nn.functional.interpolate(transformer_attribution, scale_factor=sf, mode='bilinear')
     transformer_attribution = transformer_attribution.reshape(im_size, im_size).cuda().data.cpu().numpy()
     transformer_attribution = (transformer_attribution - transformer_attribution.min()) / (
-                transformer_attribution.max() - transformer_attribution.min())
+            transformer_attribution.max() - transformer_attribution.min())
     image_transformer_attribution = original_image.permute(1, 2, 0).data.cpu().numpy()
     image_transformer_attribution = (image_transformer_attribution - image_transformer_attribution.min()) / (
-                image_transformer_attribution.max() - image_transformer_attribution.min())
+            image_transformer_attribution.max() - image_transformer_attribution.min())
     vis = show_cam_on_image(image_transformer_attribution, transformer_attribution)
     vis = np.uint8(255 * vis)
     vis = cv2.cvtColor(np.array(vis), cv2.COLOR_RGB2BGR)
@@ -157,7 +176,7 @@ def generate_visualization(original_image, class_index=None, return_loss=None):
 
 def print_top_classes(predictions, dataset='imagenet', **kwargs):
     # Print Top-5 predictions
-    cls2idx = CLS2IDX if (dataset=='imagenet') else CLS2IDX_RAFDB
+    cls2idx = CLS2IDX if (dataset == 'imagenet') else CLS2IDX_RAFDB
     if not torch.is_tensor(predictions):
         predictions = torch.tensor(predictions)
     prob = torch.softmax(predictions, dim=1)
@@ -177,32 +196,46 @@ def print_top_classes(predictions, dataset='imagenet', **kwargs):
         print(output_string)
 
 
+fig, axs = plt.subplots(1, 4)
+
 image = Image.open(f'samples/{im_nm}')
-dog_cat_image = transform(image)
+im_trans = transform(image)
 
 if choose_model == 'deit':
-    output = model(dog_cat_image.unsqueeze(0).cuda())
+    output = model(im_trans.unsqueeze(0).cuda())
     print_top_classes(output)
 elif choose_model == 'apvit':
-    output = model(dog_cat_image.unsqueeze(0).cuda(), return_loss=False)
+    output = model(im_trans.unsqueeze(0).cuda(), return_loss=False)
     print_top_classes(output, 'raf')
 
 # dog
 # generate visualization for class 243: 'bull mastiff' - the predicted class
 if choose_model == 'deit':
-    fig, axs = plt.subplots(1, 3)
-    dog = generate_visualization(dog_cat_image)
-    cat = generate_visualization(dog_cat_image, class_index=282)
-    axs[2].imshow(cat)
-    axs[2].axis('off')
+    dog = generate_visualization(im_trans)
+    cat = generate_visualization(im_trans, class_index=282)
+    axs[3].imshow(cat)
+    axs[3].axis('off')
 elif choose_model == 'apvit':
-    fig, axs = plt.subplots(1, 2)
-    dog = generate_visualization(dog_cat_image, return_loss=False)
-    sad = generate_visualization(dog_cat_image, class_index=3, return_loss=False)
+    prd = generate_visualization(im_trans, return_loss=False)
+    tru = generate_visualization(im_trans, class_index=img_lbl_dict[im_nm], return_loss=False)
+    ang = generate_visualization(im_trans, class_index=0, return_loss=False)
+    dsg = generate_visualization(im_trans, class_index=1, return_loss=False)
+    frt = generate_visualization(im_trans, class_index=2, return_loss=False)
+    sad = generate_visualization(im_trans, class_index=3, return_loss=False)
+    hpy = generate_visualization(im_trans, class_index=4, return_loss=False)
+    srp = generate_visualization(im_trans, class_index=5, return_loss=False)
+    ntr = generate_visualization(im_trans, class_index=6, return_loss=False)
+
+    axs[3].imshow(tru)
+    axs[3].axis('off')
+    axs[3].set_title('True')
 
 axs[0].imshow(image)
 axs[0].axis('off')
-axs[1].imshow(dog)
+axs[1].imshow(im_trans.permute([1,2,0]))
 axs[1].axis('off')
+axs[2].imshow(prd)
+axs[2].axis('off')
+axs[2].set_title('Pred')
 
 plt.show(block=True)
