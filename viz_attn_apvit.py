@@ -33,14 +33,16 @@ deit_cp_pth = os.path.join(home_pth, 'Transformers/deit/out/jobs_after_adding_se
 deit_model_name = 'deit_blur0_BS128'
 
 apvit_cp_pth = os.path.join(home_pth, 'Transformers/APViT/work_dirs')
-apvit_model_name = 'RAF_blur8_freeze'
-# apvit_model_name = 'RAF_blur8_pretrained0-8_freeze_fix_projs'
+# apvit_model_name = 'RAF_blur8_freeze'
+apvit_model_name = 'RAF_blur8_pretrained0-8_freeze_fix_projs'
 
 if choose_model == 'deit':
     im_size = 224
     im_nm = 'catdog.png'
     sf = 16
-    normalize = transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+    # normalize = transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+    mean = [0.5, 0.5, 0.5]
+    std = [0.5, 0.5, 0.5]
 
 elif choose_model == 'apvit':
     im_size = 112
@@ -50,9 +52,15 @@ elif choose_model == 'apvit':
     im_nm = 'test_0411.jpg'
     im_nm = 'test_0189.jpg'
     # im_nm = 'test_1697_112.jpg'
+    im_nm = f'test_images_apvit/{im_nm}'
     sf = 8
     # normalize = transforms.Normalize(mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375])
-    normalize = transforms.Normalize(mean=[.485, .456, .406], std=[.229, .224, .225])
+    mean = np.array([123.675, 116.28, 103.53])/255
+    std = np.array([58.395, 57.12, 57.375])/255
+    # normalize = transforms.Normalize(mean=[.485, .456, .406], std=[.229, .224, .225])
+
+normalize = transforms.Normalize(mean=mean, std=std)
+unnormalize = transforms.Normalize(mean=(-mean / std).tolist(), std=(1.0 / std).tolist())
 
 img_lbl_dict = {
     'test_0038_112.jpg': 4,
@@ -110,12 +118,35 @@ class IdentityHeadWithSimpleTest(nn.Module):
         return x
 
 
+# get image after transforms, and prepare it for visualization
+def show_im_trans(img):
+    img = img.permute(1, 2, 0).data.cpu().numpy()
+    img = (img - img.min()) / (img.max() - img.min())
+    img = np.float32(img)
+    img = img / np.max(img)
+    img = np.uint8(255 * img)
+    # img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+    return img
+
+
 # create heatmap from mask on image
-def show_cam_on_image(img, mask):
+def show_cam_on_image(img, mask, add_alpha=False, threshold=0.3, alpha=0.5):
     heatmap = cv2.applyColorMap(np.uint8(255 * mask), cv2.COLORMAP_JET)
     heatmap = np.float32(heatmap) / 255
-    cam = heatmap + np.float32(img)
-    cam = cam / np.max(cam)
+    heatmap = cv2.cvtColor(heatmap, cv2.COLOR_RGB2BGR)
+    if add_alpha:
+
+        # Alpha is 0 below threshold, grows above threshold
+        alpha_map = (mask >= threshold).astype(np.float32)
+
+        # [H, W] -> [H, W, 1]
+        alpha_map = alpha_map[..., None]
+        cam = img * (1 - alpha_map) + heatmap * alpha_map
+        cam = np.clip(cam, 0, 1)
+    else:
+        cam = heatmap + np.float32(img)
+        cam = cam / np.max(cam)
+
     return cam
 
 
@@ -150,7 +181,7 @@ model.eval()
 attribution_generator = LRP(model)
 
 
-def generate_visualization(original_image, class_index=None, return_loss=None):
+def generate_visualization(original_image, class_index=None, return_loss=None, add_alpha=False):
     if return_loss is not None:
         transformer_attribution = attribution_generator.generate_LRP(original_image.unsqueeze(0).cuda(),
                                                                      method="transformer_attribution",
@@ -168,9 +199,9 @@ def generate_visualization(original_image, class_index=None, return_loss=None):
     image_transformer_attribution = original_image.permute(1, 2, 0).data.cpu().numpy()
     image_transformer_attribution = (image_transformer_attribution - image_transformer_attribution.min()) / (
             image_transformer_attribution.max() - image_transformer_attribution.min())
-    vis = show_cam_on_image(image_transformer_attribution, transformer_attribution)
+    vis = show_cam_on_image(image_transformer_attribution, transformer_attribution, add_alpha=add_alpha)
     vis = np.uint8(255 * vis)
-    vis = cv2.cvtColor(np.array(vis), cv2.COLOR_RGB2BGR)
+    # vis = cv2.cvtColor(np.array(vis), cv2.COLOR_RGB2BGR)
     return vis
 
 
@@ -201,6 +232,9 @@ fig, axs = plt.subplots(1, 4)
 image = Image.open(f'samples/{im_nm}')
 im_trans = transform(image)
 
+im_unnorm = unnormalize(im_trans)
+im_trans_show = show_im_trans(im_unnorm)
+
 if choose_model == 'deit':
     output = model(im_trans.unsqueeze(0).cuda())
     print_top_classes(output)
@@ -217,7 +251,7 @@ if choose_model == 'deit':
     axs[3].axis('off')
 elif choose_model == 'apvit':
     prd = generate_visualization(im_trans, return_loss=False)
-    tru = generate_visualization(im_trans, class_index=img_lbl_dict[im_nm], return_loss=False)
+    tru = generate_visualization(im_trans, class_index=img_lbl_dict[im_nm.replace('test_images_apvit/', '')], return_loss=False)
     ang = generate_visualization(im_trans, class_index=0, return_loss=False)
     dsg = generate_visualization(im_trans, class_index=1, return_loss=False)
     frt = generate_visualization(im_trans, class_index=2, return_loss=False)
@@ -232,7 +266,7 @@ elif choose_model == 'apvit':
 
 axs[0].imshow(image)
 axs[0].axis('off')
-axs[1].imshow(im_trans.permute([1,2,0]))
+axs[1].imshow(im_trans_show)
 axs[1].axis('off')
 axs[2].imshow(prd)
 axs[2].axis('off')
