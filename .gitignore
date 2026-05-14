@@ -9,3 +9,6 @@ baselines/ViT/visualizations/
 bert_models/
 data/movies/
 
+# Add for viz_attn_blurs:
+samples/test_images_apvit
+
