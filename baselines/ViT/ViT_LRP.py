@@ -5,10 +5,17 @@ import torch
 import torch.nn as nn
 from einops import rearrange
 from modules.layers_ours import *
+from functools import partial
+import sys
 
 from baselines.ViT.helpers import load_pretrained
 from baselines.ViT.weight_init import trunc_normal_
 from baselines.ViT.layer_helpers import to_2tuple
+
+apvit_pth = "/home/projects/bagon/ilanaveh/code/Transformers/APViT"
+sys.path.insert(0, apvit_pth)
+from mmcls.models.utils import top_pool
+from mmcls.models.vit.layers import DropPath
 
 
 def _cfg(url='', **kwargs):
@@ -47,6 +54,75 @@ def compute_rollout_attention(all_layer_matrices, start_layer=0):
     for i in range(start_layer+1, len(all_layer_matrices)):
         joint_attention = all_layer_matrices[i].bmm(joint_attention)
     return joint_attention
+
+
+def compute_rollout_attention_pooled(
+        all_layer_matrices,
+        keep_indices=None,
+        start_layer=0):
+    # Based on compute_rollout_attention, but allow for layers with different token counts (due to APViT pooling): add
+    # residual separately for every layer.
+    matrices = []
+
+    for matrix in all_layer_matrices:
+
+        B, N, _ = matrix.shape
+
+        eye = torch.eye(
+            N,
+            device=matrix.device,
+            dtype=matrix.dtype
+        ).unsqueeze(0).expand(B, N, N)
+
+        matrices.append(matrix + eye)
+
+    joint_attention = matrices[start_layer]
+
+    for i in range(start_layer + 1, len(matrices)):
+
+        # Pooling takes place AFTER attention in block i-1,
+        # and BEFORE attention in block i.
+        if keep_indices is not None:
+
+            keep = keep_indices[i - 1]
+
+            if keep is not None:
+
+                # Accept [B,K,C], [B,K,1], or [B,K]
+                if keep.ndim == 3:
+                    keep = keep[:, :, 0]
+
+                keep = keep.long()
+
+                # joint_attention:
+                # [B, N_previous, N_start]
+                #
+                # Select the rows surviving pooling:
+                # -> [B, K, N_start]
+
+                row_index = keep.unsqueeze(-1).expand(
+                    -1,
+                    -1,
+                    joint_attention.shape[-1]
+                )
+
+                joint_attention = joint_attention.gather(
+                    dim=1,
+                    index=row_index
+                )
+
+        # [B, N_current, N_current]
+        #       @
+        # [B, N_current, N_start]
+        #
+        # ->
+        # [B, N_current, N_start]
+        joint_attention = matrices[i].bmm(
+            joint_attention
+        )
+
+    return joint_attention
+
 
 class Mlp(nn.Module):
     def __init__(self, in_features, hidden_features=None, out_features=None, drop=0.):
@@ -157,7 +233,7 @@ class Attention(nn.Module):
         cam = rearrange(cam, 'b n (h d) -> b h n d', h=self.num_heads)
 
         # attn = A*V
-        (cam1, cam_v)= self.matmul2.relprop(cam, **kwargs)
+        (cam1, cam_v) = self.matmul2.relprop(cam, **kwargs)
         cam1 /= 2
         cam_v /= 2
 
@@ -175,6 +251,103 @@ class Attention(nn.Module):
         cam_qkv = rearrange([cam_q, cam_k, cam_v], 'qkv b h n d -> b n (qkv h d)', qkv=3, h=self.num_heads)
 
         return self.qkv.relprop(cam_qkv, **kwargs)
+
+
+class PoolingAttention(Attention):
+    """
+    Inherit Attention defined here (with LRP relprop function), but add code from
+    APViT/mmcls/models/backbones/modules/vit_pooling.py>PoolingAttention, for pooling functionality.
+    """
+    def __init__(self, dim, num_heads=8, qkv_bias=False, attn_drop=0., proj_drop=0., pool_config=None):
+        super().__init__(dim, num_heads=num_heads, qkv_bias=qkv_bias, attn_drop=attn_drop, proj_drop=proj_drop)
+        self.dim = dim
+        self.pool_config = pool_config
+
+    def forward(self, x):
+        B, N, C = x.shape
+        qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads)
+        qkv = qkv.permute(2, 0, 3, 1, 4)
+        q, k, v = qkv[0], qkv[1], qkv[2]  # make torchscript happy (cannot use tensor as tuple)
+        self.save_v(v)
+
+        attn = self.matmul1([q, k]) * self.scale  # [B, head_num, token_num, token_num]
+
+        if self.pool_config:
+            attn_method = self.pool_config.get('attn_method')
+            if attn_method == 'SUM_ABS_1':
+                attn_weight = attn[:, :, 0, :].transpose(-1, -2)  # [B, token_num, head_num]
+                attn_weight = torch.sum(torch.abs(attn_weight), dim=-1).unsqueeze(-1)
+            elif attn_method == 'SUM':
+                attn_weight = attn[:, :, 0, :].transpose(-1, -2)  # [B, token_num, head_num]
+                attn_weight = torch.sum(attn_weight, dim=-1).unsqueeze(-1)
+            elif attn_method == 'MAX':
+                attn_weight = attn[:, :, 0, :].transpose(-1, -2)
+                attn_weight = torch.max(attn_weight, dim=-1)[0].unsqueeze(-1)
+            else:
+                raise ValueError('Invalid attn_method: %s' % attn_method)
+
+            # attn_weight = torch.rand(attn_weight.shape, device=attn_weight.device)
+            keep_index = top_pool(attn_weight, dim=self.dim, **self.pool_config)    # [B, N, d]
+        else:
+            keep_index = None
+
+        # IN 26/1/26: Add for visualizing attention (viz_attention_vit.py)
+        self.attn_weight = attn_weight
+        self.keep_index = None if keep_index is None else keep_index[:, :, 0]  # [B, N]
+
+        attn = self.softmax(attn)
+        attn = self.attn_drop(attn)
+
+        self.save_attn(attn)
+        attn.register_hook(self.save_attn_gradients)
+
+        x = self.matmul2([attn, v]).transpose(1, 2).reshape(B, N, C)
+        x = self.proj(x)
+        x = self.proj_drop(x)
+        return x, keep_index
+
+        # B, N, C = x.shape
+        # qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads)
+        # qkv = qkv.permute(2, 0, 3, 1, 4)
+        # q, k, v = qkv[0], qkv[1], qkv[2]  # make torchscript happy (cannot use tensor as tuple)
+        #
+        # attn = self.matmul1([q, k])  # [B, head_num, token_num, token_num]
+        #
+        # if self.pool_config:
+        #     attn_method = self.pool_config.get('attn_method')
+        #     if attn_method == 'SUM_ABS_1':
+        #         attn_weight = attn[:, :, 0, :].transpose(-1, -2)  # [B, token_num, head_num]
+        #         attn_weight = torch.sum(torch.abs(attn_weight), dim=-1).unsqueeze(-1)
+        #     elif attn_method == 'SUM':
+        #         attn_weight = attn[:, :, 0, :].transpose(-1, -2)  # [B, token_num, head_num]
+        #         attn_weight = torch.sum(attn_weight, dim=-1).unsqueeze(-1)
+        #     elif attn_method == 'MAX':
+        #         attn_weight = attn[:, :, 0, :].transpose(-1, -2)
+        #         attn_weight = torch.max(attn_weight, dim=-1)[0].unsqueeze(-1)
+        #     else:
+        #         raise ValueError('Invalid attn_method: %s' % attn_method)
+        #
+        #     # attn_weight = torch.rand(attn_weight.shape, device=attn_weight.device)
+        #     keep_index = top_pool(attn_weight, dim=self.dim, **self.pool_config)
+        # else:
+        #     keep_index = None
+        #
+        # # IN 26/1/26: Add for visualizing attention (viz_attention_vit.py)
+        # self.attn_weight = attn_weight
+        # if keep_index is not None:
+        #     self.keep_index = top_pool(attn_weight, dim=1, **self.pool_config)  # dim=1
+        # else:
+        #     self.keep_index = None
+        #
+        # attn = self.softmax(attn, dim=-1)
+        # attn = self.attn_drop(attn)
+        #
+        # attn.register_hook(self.save_attn_gradients)
+        #
+        # x = self.matmul2([attn, v]).transpose(1, 2).reshape(B, N, C)
+        # x = self.proj(x)
+        # x = self.proj_drop(x)
+        # return x, keep_index
 
 
 class Block(nn.Module):
@@ -210,6 +383,87 @@ class Block(nn.Module):
         cam2 = self.attn.relprop(cam2, **kwargs)
         cam2 = self.norm1.relprop(cam2, **kwargs)
         cam = self.clone1.relprop((cam1, cam2), **kwargs)
+        return cam
+
+
+class PoolingBlock(Block):
+    """
+    Inherit Block defined here (with LRP relprop function), but add code from
+    APViT/mmcls/models/backbones/modules/vit_pooling.py>PoolingBlock, for pooling functionality.
+    Create new relprop function, for reversing token-pooling before back-propagation.
+    """
+    def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, drop=0., attn_drop=0.,
+                 pool_config=None):
+        # Removed drop_path from original PoolingBlock since it's 0 anyway.
+        super().__init__(dim=dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias,
+                         drop=drop, attn_drop=attn_drop)
+        self.attn = PoolingAttention(dim, num_heads=num_heads, qkv_bias=qkv_bias, attn_drop=attn_drop,
+                                     proj_drop=drop, pool_config=pool_config)
+
+        # Information needed to reverse the token selection (for relprop)
+        self.pool_keep_index = None
+        self.num_tokens_before_pool = None
+
+    def forward(self, x):
+        x1, x2 = self.clone1(x, 2)
+        feature, keep_index = self.attn(self.norm1(x2))
+        x = self.add1([x1, feature])
+
+        # Save information needed by relprop
+        self.pool_keep_index = None
+        self.num_tokens_before_pool = x.shape[1]
+
+        if keep_index is not None:
+            if keep_index.shape[1] != x.shape[1]:
+                self.pool_keep_index = keep_index
+
+                # ToDo: should there be a new gather function, with relprop?
+                x = x.gather(dim=1, index=keep_index)
+
+        x1, x2 = self.clone2(x, 2)
+        x = self.add2([x1, self.mlp(self.norm2(x2))])
+        return x
+
+    def relprop(self, cam, **kwargs):
+
+        # --------------------------------------------------
+        # Reverse the MLP residual branch
+        # --------------------------------------------------
+
+        (cam1, cam2) = self.add2.relprop(cam, **kwargs)
+        cam2 = self.mlp.relprop(cam2, **kwargs)
+        cam2 = self.norm2.relprop(cam2, **kwargs)
+        cam = self.clone2.relprop((cam1, cam2), **kwargs)
+
+        # --------------------------------------------------
+        # REVERSE TOKEN POOLING
+        # K tokens -> N tokens
+        # --------------------------------------------------
+
+        if self.pool_keep_index is not None:
+            full_cam = cam.new_zeros(
+                cam.shape[0],
+                self.num_tokens_before_pool,
+                cam.shape[2]
+            )
+
+            full_cam.scatter_add_(
+                dim=1,
+                index=self.pool_keep_index,
+                src=cam
+            )
+
+            cam = full_cam
+
+        # --------------------------------------------------
+        # Reverse the attention residual branch
+        # --------------------------------------------------
+
+        (cam1, cam2) = self.add1.relprop(cam, **kwargs)
+        cam2 = self.attn.relprop(cam2, **kwargs)
+        cam2 = self.norm1.relprop(cam2, **kwargs)
+        cam = self.clone1.relprop((cam1, cam2), **kwargs)
+
         return cam
 
 
@@ -356,6 +610,7 @@ class VisionTransformer(nn.Module):
         # our method, method name grad is legacy
         elif method == "transformer_attribution" or method == "grad":
             cams = []
+            keep_indices = []
             for blk in self.blocks:
                 grad = blk.attn.get_attn_gradients()
                 cam = blk.attn.get_attn_cam()
@@ -364,8 +619,20 @@ class VisionTransformer(nn.Module):
                 cam = grad * cam
                 cam = cam.clamp(min=0).mean(dim=0)
                 cams.append(cam.unsqueeze(0))
-            rollout = compute_rollout_attention(cams, start_layer=start_layer)
-            cam = rollout[:, 0, 1:]
+                # Pooling performed AFTER this block's attention
+                keep_indices.append(getattr(blk, "pool_keep_index", None))
+            if isinstance(self, APViT_LRP):
+                rollout = compute_rollout_attention_pooled(cams, keep_indices=keep_indices, start_layer=start_layer)
+                cam = rollout[:, 0, 1:]
+                if self.cnn_keep_indexes is not None:
+                    full_cam = cam.new_zeros(cam.shape[0], self.cnn_num_tokens_before_pool)
+                    token_ids = self.get_original_patch_indices(start_layer=start_layer, device=cam.device)  # for dealing with start_layer!=1.
+                    patch_ids = token_ids[:, 1:]
+                    full_cam.scatter_add_(dim=1, index=patch_ids, src=cam)
+                    cam = full_cam
+            else:
+                rollout = compute_rollout_attention(cams, start_layer=start_layer)
+                cam = rollout[:, 0, 1:]
             return cam
             
         elif method == "last_layer":
@@ -427,6 +694,179 @@ def vit_large_patch16_224(pretrained=False, **kwargs):
 def deit_base_patch16_224(pretrained=False, **kwargs):
     model = VisionTransformer(
         patch_size=16, embed_dim=768, depth=12, num_heads=12, mlp_ratio=4, qkv_bias=True, **kwargs)
+    model.default_cfg = _cfg()
+    if pretrained:
+        checkpoint = torch.hub.load_state_dict_from_url(
+            url="https://dl.fbaipublicfiles.com/deit/deit_base_patch16_224-b5f2ef4d.pth",
+            map_location="cpu", check_hash=True
+        )
+        model.load_state_dict(checkpoint["model"])
+    return model
+
+
+class APViT_LRP(VisionTransformer):
+    """
+    Inherit VisionTransformer defined here (with LRP mechanisms), but add code from
+    APViT/mmcls/models/vit/vit_siam_merge.py>PoolingViT, for Pooling functionality.
+    """
+    def __init__(self, embed_dim, in_channels,
+                 attn_method='SUM_ABS_1',
+                 cnn_pool_config=None,
+                 vit_pool_configs=None,
+                 depth=12,
+                 num_heads=12,
+                 mlp_ratio=4.,
+                 qkv_bias=False,
+                 drop_rate=0.,
+                 attn_drop_rate=0.,
+                 **kwargs):
+        super().__init__(embed_dim=embed_dim, depth=depth, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias,
+                         drop_rate=drop_rate, attn_drop_rate=attn_drop_rate, **kwargs)
+        num_patches = self.pos_embed.shape[1] - 1
+        self.patch_pos_embed = nn.Parameter(torch.zeros(1, num_patches, embed_dim))
+        self.cls_pos_embed = nn.Parameter(torch.zeros(1, 1, embed_dim))
+
+        self.projs = nn.ModuleList([nn.Conv2d(in_channels, embed_dim, 1,)])
+        self.attn_method = attn_method
+        self.cnn_pool_config = cnn_pool_config
+
+        self.cnn_keep_indexes = None
+        self.cnn_num_tokens_before_pool = None
+
+        self.patch_add = Add()
+        self.cls_add = Add()
+
+        if attn_method == 'SUM':
+            self.attn_f = lambda x: torch.sum(x, dim=1).unsqueeze(1)
+        elif attn_method == 'SUM_ABS_1':
+            self.attn_f = lambda x: torch.sum(torch.abs(x), dim=1).unsqueeze(1)
+        elif attn_method == 'SUM_ABS_2':
+            self.attn_f = lambda x: torch.sum(torch.pow(torch.abs(x), 2), dim=1).unsqueeze(1)
+        elif attn_method == 'MAX':
+            self.attn_f = lambda x: torch.max(x, dim=1)[0].unsqueeze(1)
+        elif attn_method == 'MAX_ABS_1':
+            self.attn_f = lambda x: torch.max(torch.abs(x), dim=1)[0].unsqueeze(1)
+        elif attn_method == 'Random':
+            self.attn_f = lambda x: x[:, torch.randint(high=x.shape[1], size=(1,))[0], ...].unsqueeze(1)
+        else:
+            raise ValueError("Unknown attn_method")
+
+        if vit_pool_configs is not None:
+            # If  vit_pool_configs is None, I used blocks defined here, even though in original PoolingViT, they used
+            # their own block. I think they should be equivalent.
+            vit_keep_rates = vit_pool_configs['keep_rates']
+            self.blocks = nn.ModuleList([
+                PoolingBlock(
+                    dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias,
+                    drop=drop_rate, attn_drop=attn_drop_rate,
+                    pool_config=dict(keep_rate=vit_keep_rates[i], **vit_pool_configs),
+                )
+                for i in range(depth)])
+
+    def forward(self, x):
+        x = x[0]
+
+        # x = self.patch_embed(x)
+        x = self.projs[0](x)
+
+        attn_map = self.attn_f(x)  # [B, 1, H, W]
+        attn_weight = attn_map.flatten(2).transpose(2, 1)
+
+        x = x.flatten(2).transpose(1, 2)  # [B, D, H, W] -> [B, H*W, D]
+
+        B, N, C = x.shape
+
+        x = self.patch_add([x, self.patch_pos_embed])
+
+        self.cnn_num_tokens_before_pool = x.shape[1]
+        self.cnn_keep_indexes = None
+
+        if self.cnn_pool_config is not None:
+            keep_indexes = top_pool(attn_weight, dim=C, **self.cnn_pool_config)
+
+            if keep_indexes is not None:
+                self.cnn_keep_indexes = keep_indexes[:, :, 0].long()
+                x = x.gather(dim=1, index=keep_indexes)
+
+        cls_tokens = self.cls_token.expand(B, -1, -1)  # stole cls_tokens impl from Phil Wang, thanks
+        cls_tokens = self.cls_add([cls_tokens, self.cls_pos_embed])
+
+        x = torch.cat((cls_tokens, x), dim=1)
+        x.register_hook(self.save_inp_grad)
+
+        for blk in self.blocks:
+            x = blk(x)
+
+        x = self.norm(x)
+        x = self.pool(x, dim=1, indices=torch.tensor(0, device=x.device))
+        x = x.squeeze(1)
+        x = self.head(x)
+        return x
+
+    def get_original_patch_indices(self, start_layer, device):
+        """
+        Return the original CNN-patch index corresponding to each token
+        entering Transformer block `start_layer`.
+
+        CLS is represented by -1.
+        """
+
+        if self.cnn_keep_indexes is not None:
+            patch_ids = self.cnn_keep_indexes
+        else:
+            # No initial CNN pooling
+            B = 1  # current attribution code assumes batch size 1
+            patch_ids = torch.arange(
+                self.cnn_num_tokens_before_pool,
+                device=device
+            ).unsqueeze(0).expand(B, -1)
+
+        patch_ids = patch_ids.to(device)
+
+        # First Transformer block receives:
+        # [CLS, selected patch 1, selected patch 2, ...]
+        cls_id = torch.full(
+            (patch_ids.shape[0], 1),
+            -1,
+            dtype=torch.long,
+            device=device
+        )
+
+        token_ids = torch.cat(
+            [cls_id, patch_ids],
+            dim=1
+        )
+
+        # Reproduce all ViT pruning that occurred BEFORE start_layer
+        for i in range(start_layer):
+            keep = getattr(self.blocks[i], 'keep_index', None)
+
+            if keep is not None:
+                if keep.ndim == 3:
+                    keep = keep[:, :, 0]
+
+                token_ids = token_ids.gather(
+                    dim=1,
+                    index=keep.long()
+                )
+
+        return token_ids
+
+
+    @property
+    def no_weight_decay(self):
+        return {'patch_pos_embed', 'cls_pos_embed', 'cls_token'}
+
+
+def deit_base_patch16_224_apvit(pretrained=False, use_pooling=True, **kwargs):
+
+    pooling_args = {'attn_method': 'SUM_ABS_1',
+                    'cnn_pool_config': dict(keep_num=160, exclude_first=False) if use_pooling else None,
+                    'vit_pool_configs': dict(keep_rates=[1.] * 4 + [0.9] * 8, exclude_first=True, attn_method='SUM') if use_pooling else None}
+    # pooling_args={}
+    model = APViT_LRP(
+        in_channels=256, patch_size=16, embed_dim=768, depth=12, num_heads=12, mlp_ratio=4, qkv_bias=True,
+        **pooling_args, **kwargs)
     model.default_cfg = _cfg()
     if pretrained:
         checkpoint = torch.hub.load_state_dict_from_url(

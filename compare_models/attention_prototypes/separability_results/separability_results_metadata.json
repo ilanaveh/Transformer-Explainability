@@ -1,0 +1,17 @@
+{
+    "result_names": [
+        "pairwise",
+        "by_sigma",
+        "by_model",
+        "model_comparisons",
+        "model_comparison_summary"
+    ],
+    "csv_files": {
+        "pairwise": "pairwise.csv",
+        "by_sigma": "by_sigma.csv",
+        "by_model": "by_model.csv",
+        "model_comparisons": "model_comparisons.csv",
+        "model_comparison_summary": "model_comparison_summary.csv"
+    },
+    "pickle_file": "separability_results.pkl"
+}

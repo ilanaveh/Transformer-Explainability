@@ -22,9 +22,15 @@ class LRP:
         self.model = model
         self.model.eval()
 
-    def generate_LRP(self, input, index=None, method="transformer_attribution", is_ablation=False, start_layer=0):
-        output = self.model(input)
+    def generate_LRP(self, input, index=None, method="transformer_attribution", is_ablation=False, start_layer=0, return_loss=None):
+        if return_loss is not None:
+            output = self.model(input, return_loss=return_loss)
+        else:
+            output = self.model(input)
         kwargs = {"alpha": 1}
+        if isinstance(output, list):
+            output = torch.tensor(output[0]).cuda()
+
         if index == None:
             index = np.argmax(output.cpu().data.numpy(), axis=-1)
 
@@ -37,8 +43,12 @@ class LRP:
         self.model.zero_grad()
         one_hot.backward(retain_graph=True)
 
-        return self.model.relprop(torch.tensor(one_hot_vector).to(input.device), method=method, is_ablation=is_ablation,
-                                  start_layer=start_layer, **kwargs)
+        if return_loss is not None:  # meaning model is apvit:
+            return self.model.vit.relprop(torch.tensor(one_hot_vector).to(input.device), method=method,
+                                          is_ablation=is_ablation, start_layer=start_layer, **kwargs)
+        else:
+            return self.model.relprop(torch.tensor(one_hot_vector).to(input.device), method=method,
+                                      is_ablation=is_ablation, start_layer=start_layer, **kwargs)
 
 
 

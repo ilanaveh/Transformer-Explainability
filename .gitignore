@@ -9,3 +9,9 @@ baselines/ViT/visualizations/
 bert_models/
 data/movies/
 
+# Add for viz_attn_blurs:
+samples/test_images_apvit
+compare_models/figures
+compare_models/difference_maps
+compare_models/attention_maps/*
+!attention_maps/create_overlayed_figures.py

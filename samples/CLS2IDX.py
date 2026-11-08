@@ -998,3 +998,14 @@ CLS2IDX = {0: 'tench, Tinca tinca',
  997: 'bolete',
  998: 'ear, spike, capitulum',
  999: 'toilet tissue, toilet paper, bathroom tissue'}
+
+# RAF-DB: According to checkpoint.meta in apvit checkpoint:
+CLS2IDX_RAFDB = {
+ 0: 'Angry',
+ 1: 'Disgust',
+ 2: 'Fear',
+ 3: 'Sad',
+ 4: 'Happy',
+ 5: 'Surprise',
+ 6: 'Neutral',
+ }
