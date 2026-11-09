@@ -14,6 +14,7 @@ _COMMON = {
 }
 
 # Add configurations by copying an entry and giving it a descriptive, unique name.
+# pred_label compares each model's own predicted-class map, including disagreements.
 CONFIGS = {
     "mixed_vs_low_blur8_pred_label": {
         "model_a": "RAF_blur8_freeze",

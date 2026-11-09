@@ -17,6 +17,34 @@ from compare_models.comp_wasserstein_dist import (
 
 
 class WassersteinTests(unittest.TestCase):
+    def test_predicted_targets_include_disagreements(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            np.save(root / 'a.npy', np.array([[1., 0], [0, 0]]))
+            np.save(root / 'b.npy', np.array([[0., 0], [0, 1]]))
+            rows = [dict(image_id=image, model=model, sigma=sigma,
+                         true_label='Happy', pred_label=prediction, target_label=target,
+                         correct=prediction == 'Happy', map_path=path)
+                    for image in ('one', 'two')
+                    for model, sigma, prediction, path in
+                    [('A', 8, 'Happy', 'a.npy'), ('B', 0, 'Sad', 'b.npy')]
+                    for target in ('Happy', 'Sad')]
+            df = pd.DataFrame(rows)
+            result = compare_models_wasserstein(df, 'A', 'B', target_mode='pred_label',
+                                               sigma_a=8, sigma_b=0, map_root=root)
+            self.assertEqual(len(result), 2)
+            self.assertTrue(result.target_label.isna().all())
+            self.assertEqual(result.target_label_a.tolist(), ['Happy', 'Happy'])
+            self.assertEqual(result.target_label_b.tolist(), ['Sad', 'Sad'])
+            np.testing.assert_allclose(result.wasserstein_distance, 1)
+            with self.assertRaisesRegex(ValueError, 'do not cover the same'):
+                compare_models_wasserstein(df[~((df.model == 'B') & (df.image_id == 'two'))],
+                                           'A', 'B', target_mode='pred_label',
+                                           sigma_a=8, sigma_b=0, map_root=root)
+            df['sigma'] = 0
+            self.assertEqual(len(compare_models_wasserstein(
+                df, 'A', 'B', target_mode='pred_label', map_root=root)), 2)
+
     def test_config_run_saves_effective_settings_and_source(self):
         import json
         root = Path(__file__).resolve().parents[1]

@@ -92,8 +92,13 @@ To compare two explicit blur conditions, supply both selectors:
 
 Use `--size 14 14` to explicitly resample both maps. Default `--target-mode
 true_label` explains the true class, even for incorrect predictions.
-`pred_label` selects each model's predicted-class map but only matches pairs
-with the same target class. `all` compares every matching target class.
+`pred_label` selects each model's own predicted-class map and pairs by image
+(and sigma unless explicit conditions are selected), including disagreements.
+Both models must cover the same image/condition keys; unmatched keys raise an
+error. Output records `target_label_a` and `target_label_b`; `target_label` is
+empty when the targets differ. For subsequent paired distance-table comparisons
+in this mode, use `--pair-cols image_id` (add condition columns if needed).
+`all` compares every matching target class.
 Multiple target maps per image are dependent observations; select one target
 per image before applying image-level paired statistical tests.
 

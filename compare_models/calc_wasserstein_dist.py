@@ -44,7 +44,8 @@ def compare_models_wasserstein(
     Duplicate keys, invalid maps, and empty selections raise errors.
     Native resolution is preserved unless output_size is supplied.
     Relative paths are resolved against map_root (cwd by default).
-    pred_label mode only pairs models predicting the same target class.
+    pred_label mode pairs each model's own predicted-class map by image,
+    allowing different target classes. Both models must cover the same keys.
     Normalized distances use diagonal units, in [0, 1].
     """
     required_cols = {
@@ -78,7 +79,9 @@ def compare_models_wasserstein(
 
     if (sigma_a is None) != (sigma_b is None):
         raise ValueError("Supply both sigma_a and sigma_b, or neither.")
-    pair_cols = ["image_id", "target_label"]
+    pair_cols = ["image_id"]
+    if target_mode != "pred_label":
+        pair_cols.append("target_label")
     if sigma_a is not None:
         df_a = df_a[df_a["sigma"] == sigma_a]
         df_b = df_b[df_b["sigma"] == sigma_b]
@@ -92,7 +95,23 @@ def compare_models_wasserstein(
         if not frame["correct"].map(lambda x: isinstance(x, (bool, np.bool_))).all():
             raise ValueError("correct must contain boolean values.")
     paired = df_a.merge(df_b, on=pair_cols, suffixes=("_a", "_b"),
-                           how="inner", validate="one_to_one")
+                           how="outer" if target_mode == "pred_label" else "inner",
+                           validate="one_to_one", indicator=True)
+    if target_mode == "pred_label" and (paired["_merge"] != "both").any():
+        counts = paired["_merge"].value_counts()
+        raise ValueError(
+            "Predicted-label maps do not cover the same images/conditions: "
+            f"{counts.get('left_only', 0)} only in model A, "
+            f"{counts.get('right_only', 0)} only in model B."
+        )
+    if target_mode == "pred_label":
+        # A shared target exists only when the two predictions agree.
+        paired["target_label"] = paired["target_label_a"].where(
+            paired["target_label_a"] == paired["target_label_b"]
+        )
+    else:
+        paired["target_label_a"] = paired["target_label"]
+        paired["target_label_b"] = paired["target_label"]
     if require_same_prediction_status:
         paired = paired[paired["correct_a"] == paired["correct_b"]]
     if paired.empty:
@@ -130,6 +149,9 @@ def compare_models_wasserstein(
             rows.append({
                 "image_id": row["image_id"],
                 "target_label": row["target_label"],
+                "target_label_a": row["target_label_a"],
+                "target_label_b": row["target_label_b"],
+                "target_mode": target_mode,
 
                 "model_a": model_a,
                 "model_b": model_b,
@@ -164,7 +186,7 @@ def compare_models_wasserstein(
         except (ValueError, OSError) as exc:
             raise ValueError(
                 f"Cannot compare image_id={row['image_id']}, "
-                f"target={row['target_label']}: {exc}"
+                f"targets=({row['target_label_a']}, {row['target_label_b']}): {exc}"
             ) from exc
 
     return pd.DataFrame(rows)
