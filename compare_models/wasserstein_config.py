@@ -3,17 +3,39 @@
 Relative paths below are relative to this file. Model names must match metadata.
 """
 
-CONFIG = {
+_COMMON = {
     "metadata": "attention_maps/NATIVE_RESOLUTION/WITH_POOLING/metadata_all_models_native.csv",
-    "model_a": "RAF_blur8_freeze",
-    "model_b": "RAF_blur8_pretrained0-8_freeze_fix_projs",
     # Use two explicit sigmas, or None for both to match all equal sigmas.
-    "sigma_a": 8,
-    "sigma_b": 8,
-    "target_mode": "pred_label",  # true_label, pred_label, or all
     "size": None,  # Native resolution, or (14, 14) for a common grid.
     # Root against which map_path entries in the metadata are resolved.
     "map_root": ".",
-    # Each run creates a unique subdirectory with distances and configuration copies.
+    # Each config writes to output_dir / config_name; reruns replace its results.
     "output_dir": "attention_comparisons/wasserstein_runs",
 }
+
+# Add configurations by copying an entry and giving it a descriptive, unique name.
+CONFIGS = {
+    "mixed_vs_low_blur8_pred_label": {
+        "model_a": "RAF_blur8_freeze",
+        "model_b": "RAF_blur8_pretrained0-8_freeze_fix_projs",
+        "sigma_a": 8,
+        "sigma_b": 8,
+        "target_mode": "pred_label",
+    },
+    "mixed_vs_low_blur8_true_label": {
+        "model_a": "RAF_blur8_freeze",
+        "model_b": "RAF_blur8_pretrained0-8_freeze_fix_projs",
+        "sigma_a": 8,
+        "sigma_b": 8,
+        "target_mode": "true_label",
+    },
+    "mixed_blur8_vs_blur0_pred_label": {
+        "model_a": "RAF_blur0_pretrained0-8_freeze",
+        "model_b": "RAF_blur8_pretrained0-8_freeze_fix_projs",
+        "sigma_a": 0,
+        "sigma_b": 8,
+        "target_mode": "pred_label",
+    },
+}
+
+DEFAULT_CONFIG = "mixed_vs_low_blur8_pred_label"

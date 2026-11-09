@@ -179,7 +179,8 @@ def main():
     from datetime import datetime, timezone
     parser = argparse.ArgumentParser(description="Calculate matched spatial Wasserstein-1 distances.")
     parser.add_argument("metadata", type=Path, nargs="?")
-    parser.add_argument("--config", type=Path, help="Python file defining CONFIG; defaults to wasserstein_config.py when no arguments are given")
+    parser.add_argument("--config", type=Path, help="Python file defining CONFIGS (or a single CONFIG)")
+    parser.add_argument("--config-name", help="Name to select from CONFIGS; defaults to DEFAULT_CONFIG")
     parser.add_argument("--model-a")
     parser.add_argument("--model-b")
     parser.add_argument("--sigma-a", type=float)
@@ -190,15 +191,34 @@ def main():
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     config_path = args.config
-    if len(sys.argv) == 1:
+    config_name = None
+    if len(sys.argv) == 1 or (args.config_name is not None and config_path is None):
         config_path = Path(__file__).with_name("wasserstein_config.py")
     if config_path is not None:
         if len(sys.argv) > 1 and (args.metadata is not None or any(
-            option != "--config" and option.startswith("--") for option in sys.argv[1:]
+            option.split("=", 1)[0] not in ("--config", "--config-name") and option.startswith("--") for option in sys.argv[1:]
         )):
-            parser.error("Use --config alone; edit options in the configuration file.")
+            parser.error("Use --config and --config-name without other overrides; edit options in the configuration file.")
         config_path = config_path.resolve()
-        config = runpy.run_path(str(config_path))["CONFIG"]
+        namespace = runpy.run_path(str(config_path))
+        if "CONFIGS" in namespace:
+            configs = namespace["CONFIGS"]
+            if not isinstance(configs, dict) or not configs:
+                parser.error("CONFIGS must be a nonempty dictionary of named configurations.")
+            config_name = args.config_name or namespace.get("DEFAULT_CONFIG")
+            if config_name is None and len(configs) == 1:
+                config_name = next(iter(configs))
+            if config_name not in configs:
+                parser.error(f"Select --config-name from: {', '.join(map(str, configs))}")
+            config = dict(configs[config_name])
+        else:
+            config = dict(namespace["CONFIG"])
+            config_name = config.pop("name", config_path.stem)
+            if args.config_name is not None and args.config_name != config_name:
+                parser.error(f"Single CONFIG is named {config_name!r}.")
+        import re
+        if not isinstance(config_name, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", config_name):
+            parser.error("Config names must start with a letter or digit and contain only letters, digits, underscores or hyphens.")
         expected = {"metadata", "model_a", "model_b", "sigma_a", "sigma_b",
                     "target_mode", "size", "map_root", "output_dir"}
         if set(config) != expected:
@@ -210,13 +230,13 @@ def main():
         args.sigma_a, args.sigma_b = config["sigma_a"], config["sigma_b"]
         args.target_mode, args.size = config["target_mode"], config["size"]
         args.map_root = config["map_root"]
-        run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")
-        args.output = config["output_dir"] / run_id / "distances.csv"
+        args.output = config["output_dir"] / config_name / "distances.csv"
         if args.target_mode not in ("true_label", "pred_label", "all"):
             parser.error("Invalid target_mode in CONFIG")
     if args.metadata is None or not args.model_a or not args.model_b or args.output is None:
         parser.error("Supply metadata, --model-a, --model-b and --output, or use --config.")
     snapshot = {
+        "config_name": config_name,
         "metadata": str(args.metadata.resolve()),
         "model_a": args.model_a, "model_b": args.model_b,
         "sigma_a": args.sigma_a, "sigma_b": args.sigma_b,

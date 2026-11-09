@@ -31,12 +31,12 @@ class WassersteinTests(unittest.TestCase):
             config = dict(metadata='metadata.csv', model_a='A', model_b='B',
                           sigma_a=8, sigma_b=0, target_mode='pred_label',
                           size=(2, 2), map_root='.', output_dir='runs')
-            source = 'CONFIG = ' + repr(config) + '\n'
+            source = 'CONFIGS = ' + repr({'first': config, 'second': dict(config, target_mode='true_label')}) + '\nDEFAULT_CONFIG = \"first\"\n'
             config_path = folder / 'config.py'
             config_path.write_text(source)
-            for _ in range(2):
+            for name in ('first', 'second', 'first'):
                 run = subprocess.run([sys.executable, '-m', 'compare_models.calc_wasserstein_dist',
-                                      '--config', str(config_path)], cwd=root,
+                                      '--config', str(config_path), '--config-name', name], cwd=root,
                                      capture_output=True, text=True)
                 self.assertEqual(run.returncode, 0, run.stderr)
             outputs = list((folder / 'runs').glob('*/distances.csv'))
@@ -46,7 +46,8 @@ class WassersteinTests(unittest.TestCase):
                 saved = json.loads(output.with_suffix('.config.json').read_text())
                 self.assertEqual(saved['sigma_a'], 8)
                 self.assertEqual(saved['sigma_b'], 0)
-                self.assertEqual(saved['target_mode'], 'pred_label')
+                self.assertEqual(saved['config_name'], output.parent.name)
+                self.assertEqual(saved['target_mode'], 'pred_label' if output.parent.name == 'first' else 'true_label')
                 self.assertEqual(saved['size'], [2, 2])
                 self.assertEqual(Path(saved['map_root']), folder)
                 self.assertEqual((output.parent / 'wasserstein_config.py').read_text(), source)

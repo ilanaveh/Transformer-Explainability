@@ -41,18 +41,29 @@ from the repository root:
 .\.venv\Scripts\python -m compare_models.calc_wasserstein_dist
 ```
 
-The `CONFIG` dictionary selects the two model names, sigma for each model,
+Each entry in the `CONFIGS` dictionary selects the two model names, sigma for each model,
 target mode (`true_label`, `pred_label`, or `all`), transport size, metadata
 CSV, map directory, and output directory. Paths are relative to the config
 file. `map_root` resolves the metadata's `map_path` entries; it should match
 the directory those paths were recorded relative to. Set both sigmas to
 `None` to compare matching conditions, or specify both to select conditions.
 
-Each run creates a unique UTC timestamp directory under `output_dir` with
-`distances.csv`, `distances.config.json` (resolved paths and effective settings),
-and a copy of `wasserstein_config.py`. You can select another configuration
-with `--config path/to/wasserstein_config.py`. Configuration mode does not
-accept additional command-line overrides. The explicit CLI below remains
+Set `DEFAULT_CONFIG` to choose the configuration used without arguments, or select
+one by name:
+
+```powershell
+.\.venv\Scripts\python -m compare_models.calc_wasserstein_dist --config-name blur8_true_label
+```
+
+Each run writes to `output_dir/<config-name>/`, containing `distances.csv`,
+`distances.config.json` (name, resolved paths and effective settings), and a copy
+of `wasserstein_config.py`. Rerunning a name replaces its results. Names must
+start with a letter or digit and contain only letters, digits, underscores or
+hyphens. Add entries to `CONFIGS` to keep multiple experiments.
+Use `--config path/to/wasserstein_config.py` to load another file, optionally
+with `--config-name NAME`. Single `CONFIG` files are also supported: set `name`
+inside the dictionary, or the filename stem is used. Configuration mode does
+not accept other command-line overrides. The explicit CLI below remains
 available and also saves a `.config.json` alongside its output CSV.
 
 The metadata CSV must contain:
