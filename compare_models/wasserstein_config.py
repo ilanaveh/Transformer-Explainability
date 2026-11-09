@@ -17,6 +17,7 @@ _COMMON = {
 # pred_label compares each model's own predicted-class map, including disagreements.
 CONFIGS = {
     "mixed_vs_low_blur8_pred_label": {
+        **_COMMON,
         "model_a": "RAF_blur8_freeze",
         "model_b": "RAF_blur8_pretrained0-8_freeze_fix_projs",
         "sigma_a": 8,
@@ -24,6 +25,7 @@ CONFIGS = {
         "target_mode": "pred_label",
     },
     "mixed_vs_low_blur8_true_label": {
+        **_COMMON,
         "model_a": "RAF_blur8_freeze",
         "model_b": "RAF_blur8_pretrained0-8_freeze_fix_projs",
         "sigma_a": 8,
@@ -31,6 +33,7 @@ CONFIGS = {
         "target_mode": "true_label",
     },
     "mixed_blur8_vs_blur0_pred_label": {
+        **_COMMON,
         "model_a": "RAF_blur0_pretrained0-8_freeze",
         "model_b": "RAF_blur8_pretrained0-8_freeze_fix_projs",
         "sigma_a": 0,
