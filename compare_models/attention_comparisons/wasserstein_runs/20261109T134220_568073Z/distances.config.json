@@ -1,0 +1,15 @@
+{
+  "metadata": "/home/projects/bagon/ilanaveh/code/Transformer-Explainability/compare_models/attention_maps/NATIVE_RESOLUTION/WITH_POOLING/metadata_all_models_native.csv",
+  "model_a": "RAF_blur8_freeze",
+  "model_b": "RAF_blur8_pretrained0-8_freeze_fix_projs",
+  "sigma_a": 8,
+  "sigma_b": 8,
+  "target_mode": "pred_label",
+  "size": null,
+  "map_root": "/home/projects/bagon/ilanaveh/code/Transformer-Explainability/compare_models",
+  "output": "/home/projects/bagon/ilanaveh/code/Transformer-Explainability/compare_models/attention_comparisons/wasserstein_runs/20261109T134220_568073Z/distances.csv",
+  "clip_negative": true,
+  "normalize_cost": true,
+  "created_at_utc": "2026-11-09T13:42:20.568491+00:00",
+  "source_config": "/home/projects/bagon/ilanaveh/code/Transformer-Explainability/compare_models/wasserstein_config.py"
+}
