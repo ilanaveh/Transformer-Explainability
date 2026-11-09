@@ -173,17 +173,60 @@ def compare_models_wasserstein(
 
 def main():
     import argparse
+    import json
+    import runpy
+    import sys
+    from datetime import datetime, timezone
     parser = argparse.ArgumentParser(description="Calculate matched spatial Wasserstein-1 distances.")
-    parser.add_argument("metadata", type=Path)
-    parser.add_argument("--model-a", required=True)
-    parser.add_argument("--model-b", required=True)
+    parser.add_argument("metadata", type=Path, nargs="?")
+    parser.add_argument("--config", type=Path, help="Python file defining CONFIG; defaults to wasserstein_config.py when no arguments are given")
+    parser.add_argument("--model-a")
+    parser.add_argument("--model-b")
     parser.add_argument("--sigma-a", type=float)
     parser.add_argument("--sigma-b", type=float)
     parser.add_argument("--size", nargs=2, type=int, metavar=("HEIGHT", "WIDTH"))
     parser.add_argument("--target-mode", choices=["true_label", "pred_label", "all"], default="true_label")
     parser.add_argument("--map-root", type=Path, help="Root of relative map paths; default: metadata directory")
-    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--output", type=Path)
     args = parser.parse_args()
+    config_path = args.config
+    if len(sys.argv) == 1:
+        config_path = Path(__file__).with_name("wasserstein_config.py")
+    if config_path is not None:
+        if len(sys.argv) > 1 and (args.metadata is not None or any(
+            option != "--config" and option.startswith("--") for option in sys.argv[1:]
+        )):
+            parser.error("Use --config alone; edit options in the configuration file.")
+        config_path = config_path.resolve()
+        config = runpy.run_path(str(config_path))["CONFIG"]
+        expected = {"metadata", "model_a", "model_b", "sigma_a", "sigma_b",
+                    "target_mode", "size", "map_root", "output_dir"}
+        if set(config) != expected:
+            parser.error(f"CONFIG must contain exactly: {sorted(expected)}")
+        for key in ("metadata", "map_root", "output_dir"):
+            config[key] = (config_path.parent / config[key]).resolve()
+        args.metadata = config["metadata"]
+        args.model_a, args.model_b = config["model_a"], config["model_b"]
+        args.sigma_a, args.sigma_b = config["sigma_a"], config["sigma_b"]
+        args.target_mode, args.size = config["target_mode"], config["size"]
+        args.map_root = config["map_root"]
+        run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")
+        args.output = config["output_dir"] / run_id / "distances.csv"
+        if args.target_mode not in ("true_label", "pred_label", "all"):
+            parser.error("Invalid target_mode in CONFIG")
+    if args.metadata is None or not args.model_a or not args.model_b or args.output is None:
+        parser.error("Supply metadata, --model-a, --model-b and --output, or use --config.")
+    snapshot = {
+        "metadata": str(args.metadata.resolve()),
+        "model_a": args.model_a, "model_b": args.model_b,
+        "sigma_a": args.sigma_a, "sigma_b": args.sigma_b,
+        "target_mode": args.target_mode, "size": args.size,
+        "map_root": str((args.map_root or args.metadata.resolve().parent).resolve()),
+        "output": str(args.output.resolve()),
+        "clip_negative": True, "normalize_cost": True,
+        "created_at_utc": datetime.now(timezone.utc).isoformat(),
+        "source_config": str(config_path) if config_path else None,
+    }
     result = compare_models_wasserstein(
         pd.read_csv(args.metadata), args.model_a, args.model_b,
         output_size=args.size, target_mode=args.target_mode,
@@ -192,7 +235,13 @@ def main():
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     result.to_csv(args.output, index=False)
+    snapshot_path = args.output.with_suffix(".config.json")
+    snapshot_path.write_text(json.dumps(snapshot, indent=2) + "\n", encoding="utf-8")
+    if config_path is not None:
+        import shutil
+        shutil.copyfile(config_path, args.output.parent / "wasserstein_config.py")
     print(f"Saved {len(result)} distances to {args.output}")
+    print(f"Saved configuration to {snapshot_path}")
 
 
 if __name__ == "__main__":

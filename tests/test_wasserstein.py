@@ -17,6 +17,40 @@ from compare_models.comp_wasserstein_dist import (
 
 
 class WassersteinTests(unittest.TestCase):
+    def test_config_run_saves_effective_settings_and_source(self):
+        import json
+        root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            np.save(folder / 'map.npy', np.eye(2))
+            rows = [dict(image_id='one', model=model, sigma=sigma,
+                         true_label='Happy', pred_label='Happy', target_label='Happy',
+                         correct=True, map_path='map.npy')
+                    for model, sigma in [('A', 8), ('B', 0)]]
+            pd.DataFrame(rows).to_csv(folder / 'metadata.csv', index=False)
+            config = dict(metadata='metadata.csv', model_a='A', model_b='B',
+                          sigma_a=8, sigma_b=0, target_mode='pred_label',
+                          size=(2, 2), map_root='.', output_dir='runs')
+            source = 'CONFIG = ' + repr(config) + '\n'
+            config_path = folder / 'config.py'
+            config_path.write_text(source)
+            for _ in range(2):
+                run = subprocess.run([sys.executable, '-m', 'compare_models.calc_wasserstein_dist',
+                                      '--config', str(config_path)], cwd=root,
+                                     capture_output=True, text=True)
+                self.assertEqual(run.returncode, 0, run.stderr)
+            outputs = list((folder / 'runs').glob('*/distances.csv'))
+            self.assertEqual(len(outputs), 2)
+            for output in outputs:
+                self.assertEqual(len(pd.read_csv(output)), 1)
+                saved = json.loads(output.with_suffix('.config.json').read_text())
+                self.assertEqual(saved['sigma_a'], 8)
+                self.assertEqual(saved['sigma_b'], 0)
+                self.assertEqual(saved['target_mode'], 'pred_label')
+                self.assertEqual(saved['size'], [2, 2])
+                self.assertEqual(Path(saved['map_root']), folder)
+                self.assertEqual((output.parent / 'wasserstein_config.py').read_text(), source)
+
     def test_known_distances_and_scale(self):
         a = np.array([[1., 0], [0, 0]])
         b = np.array([[0., 0], [0, 1]])
