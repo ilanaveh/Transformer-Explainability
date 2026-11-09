@@ -16,7 +16,8 @@ import torch
 import torch.nn.functional as F
 import json
 
-from create_attn_maps import EMOTIONS
+# RAF order from samples/CLS2IDX.py, without importing the model-generation stack.
+EMOTIONS = ["Angry", "Disgust", "Fear", "Sad", "Happy", "Surprise", "Neutral"]
 
 try:
     import ot
@@ -25,6 +26,12 @@ except ImportError as exc:
         "This analysis requires Python Optimal Transport. "
         "Install it with: pip install POT"
     ) from exc
+
+
+if __package__:
+    from .wasserstein import make_2d_cost_matrix, wasserstein_distance_2d, prepare_map, normalize_map
+else:
+    from wasserstein import make_2d_cost_matrix, wasserstein_distance_2d, prepare_map, normalize_map
 
 
 # ============================================================
@@ -234,25 +241,7 @@ def normalize_probability_map(
     eps:
         Numerical threshold used to detect empty maps.
     """
-    relevance = ensure_2d_map(relevance).copy()
-
-    if clip_negative:
-        relevance = np.maximum(relevance, 0.0)
-    elif np.any(relevance < 0):
-        raise ValueError(
-            "The map contains negative values. A probability distribution "
-            "cannot contain negative mass. Set clip_negative=True or define "
-            "a separate analysis for positive and negative relevance."
-        )
-
-    total = relevance.sum()
-
-    if total <= eps:
-        raise ValueError(
-            "Relevance map has no positive mass after preprocessing."
-        )
-
-    return relevance / total
+    return normalize_map(relevance, eps=eps, clip_negative=clip_negative)
 
 
 def resize_probability_map(
@@ -265,7 +254,7 @@ def resize_probability_map(
 
     Downsampling substantially reduces the cost of exact optimal transport.
     Coordinates are normalized later, so the resulting Wasserstein distances
-    do not depend on the original pixel resolution.
+    use diagonal units; interpolation can still change the distributions.
     """
     relevance = normalize_probability_map(
         relevance,
@@ -294,52 +283,9 @@ def resize_probability_map(
 # 3. Exact two-dimensional Wasserstein-1 distance
 # ============================================================
 
-@lru_cache(maxsize=None)
-def create_spatial_cost_matrix(
-    height: int,
-    width: int,
-    normalize_coordinates: bool = True,
-) -> np.ndarray:
-    """
-    Create the ground-cost matrix between all spatial positions.
-
-    The cost is Euclidean spatial distance.
-
-    When normalize_coordinates=True:
-        top-left     = (0, 0)
-        bottom-right = (1, 1)
-
-    Therefore, the maximum possible transport distance is sqrt(2).
-    """
-    if height < 1 or width < 1:
-        raise ValueError(
-            f"Invalid spatial size: {(height, width)}"
-        )
-
-    rows, cols = np.meshgrid(
-        np.arange(height, dtype=np.float64),
-        np.arange(width, dtype=np.float64),
-        indexing="ij",
-    )
-
-    coordinates = np.column_stack(
-        [rows.ravel(), cols.ravel()]
-    )
-
-    if normalize_coordinates:
-        if height > 1:
-            coordinates[:, 0] /= height - 1
-
-        if width > 1:
-            coordinates[:, 1] /= width - 1
-
-    cost_matrix = ot.dist(
-        coordinates,
-        coordinates,
-        metric="euclidean",
-    )
-
-    return np.asarray(cost_matrix, dtype=np.float64)
+def create_spatial_cost_matrix(height, width, normalize_coordinates=True):
+    """Shared Euclidean cost: diagonal units by default, grid units otherwise."""
+    return make_2d_cost_matrix(height, width, normalize_coordinates)
 
 
 def wasserstein_2d_distance(
@@ -366,7 +312,7 @@ def wasserstein_2d_distance(
         spatial precision and computation time.
 
     normalize_coordinates:
-        If True, spatial coordinates are scaled to [0, 1].
+        If True, Euclidean costs are divided by the grid diagonal (range [0, 1]).
 
         This makes the result comparable across map resolutions.
 
@@ -401,32 +347,9 @@ def wasserstein_2d_distance(
         clip_negative=clip_negative,
     )
 
-    mass_a = np.ascontiguousarray(
-        prob_a.ravel(),
-        dtype=np.float64,
+    return wasserstein_distance_2d(
+        prob_a, prob_b, normalize_cost=normalize_coordinates,
     )
-    mass_b = np.ascontiguousarray(
-        prob_b.ravel(),
-        dtype=np.float64,
-    )
-
-    # Correct any tiny floating-point discrepancy.
-    mass_a /= mass_a.sum()
-    mass_b /= mass_b.sum()
-
-    cost_matrix = create_spatial_cost_matrix(
-        height=height,
-        width=width,
-        normalize_coordinates=normalize_coordinates,
-    )
-
-    distance = ot.emd2(
-        mass_a,
-        mass_b,
-        cost_matrix,
-    )
-
-    return float(distance)
 
 
 # ============================================================
@@ -549,7 +472,7 @@ def compute_emotion_separability(
         Downsampled size used for optimal transport.
 
     normalize_coordinates:
-        Normalize spatial coordinates to [0, 1].
+        Divide Euclidean transport costs by the grid diagonal (range [0, 1]).
 
     clip_negative:
         Remove negative relevance before probability normalization.

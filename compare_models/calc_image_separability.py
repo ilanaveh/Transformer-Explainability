@@ -26,6 +26,12 @@ except ImportError as exc:
     ) from exc
 
 
+if __package__:
+    from .wasserstein import make_2d_cost_matrix, wasserstein_distance_2d, prepare_map
+else:
+    from wasserstein import make_2d_cost_matrix, wasserstein_distance_2d, prepare_map
+
+
 # ============================================================
 # 1. Load and validate normalized attention maps
 # ============================================================
@@ -139,43 +145,9 @@ def resize_probability_map(
 # 2. Wasserstein distance
 # ============================================================
 
-@lru_cache(maxsize=None)
-def create_spatial_cost_matrix(
-    height: int,
-    width: int,
-    normalize_coordinates: bool = True,
-) -> np.ndarray:
-    """
-    Create the Euclidean transport-cost matrix between all map positions.
-
-    With normalized coordinates, spatial positions range from 0 to 1 along
-    each image axis. Distances are therefore comparable across resolutions.
-    """
-    rows, cols = np.meshgrid(
-        np.arange(height, dtype=np.float64),
-        np.arange(width, dtype=np.float64),
-        indexing="ij",
-    )
-
-    coordinates = np.column_stack(
-        [rows.ravel(), cols.ravel()]
-    )
-
-    if normalize_coordinates:
-        if height > 1:
-            coordinates[:, 0] /= height - 1
-
-        if width > 1:
-            coordinates[:, 1] /= width - 1
-
-    return np.asarray(
-        ot.dist(
-            coordinates,
-            coordinates,
-            metric="euclidean",
-        ),
-        dtype=np.float64,
-    )
+def create_spatial_cost_matrix(height, width, normalize_coordinates=True):
+    """Shared Euclidean cost: diagonal units by default, grid units otherwise."""
+    return make_2d_cost_matrix(height, width, normalize_coordinates)
 
 
 def wasserstein_2d_distance_from_prepared_maps(
@@ -187,25 +159,7 @@ def wasserstein_2d_distance_from_prepared_maps(
     Compute exact 2D Wasserstein-1 distance between two already resized,
     normalized probability maps.
     """
-    mass_a = np.ascontiguousarray(
-        map_a.ravel(),
-        dtype=np.float64,
-    )
-    mass_b = np.ascontiguousarray(
-        map_b.ravel(),
-        dtype=np.float64,
-    )
-
-    mass_a /= mass_a.sum()
-    mass_b /= mass_b.sum()
-
-    return float(
-        ot.emd2(
-            mass_a,
-            mass_b,
-            cost_matrix,
-        )
-    )
+    return wasserstein_distance_2d(map_a, map_b, cost_matrix=cost_matrix)
 
 
 # ============================================================
@@ -553,6 +507,7 @@ def _make_pairwise_cache_metadata(
     current analysis inputs.
     """
     return {
+        "distance_metric_version": "w1_diagonal_v1",
         "model": str(model),
         "n_images": int(len(image_ids)),
         "image_ids": [str(x) for x in image_ids],
@@ -577,6 +532,7 @@ def _cache_metadata_matches(
     and analysis settings.
     """
     fields_to_compare = [
+        "distance_metric_version",
         "model",
         "n_images",
         "image_ids",
@@ -619,7 +575,7 @@ def compute_pairwise_image_distances(
         Spatial resolution used for Wasserstein transport.
 
     normalize_coordinates:
-        If True, spatial coordinates are normalized to [0, 1].
+        If True, Euclidean costs are divided by the grid diagonal (range [0, 1]).
 
     cache_dir:
         Directory for model-level cached pairwise results.
@@ -1734,76 +1690,77 @@ def analyze_attention_map_class_separability(
 
     return results
 
-metadata_df = pd.read_csv(
-    "attention_maps/NATIVE_RESOLUTION/metadata_all_models_native.csv"
-)
-
-models_to_compare = [
-    "RAF_blur8_pretrained0-8_freeze_fix_projs",
-    "RAF_blur8_freeze",
-]
-
-image_subsets = {
-    'all_pred':
-        {
-            'target_map_type': 'predicted',
-            'save_dir': "attention_maps/image_attention_separability_sigma8_ALL_PRED",
-            'require_correct_all_models': False,
-        },
-    'all_true':
-        {
-            'target_map_type': 'true',
-            'save_dir': "attention_maps/image_attention_separability_sigma8_ALL_TRUE",
-            'require_correct_all_models': False,
-        },
-    'correct_pred':
-        {
-            'target_map_type': 'predicted',
-            'save_dir': "attention_maps/image_attention_separability_sigma8_CORRECT_PRED",
-            'require_correct_all_models': True,
-        }
-}
-
-for img_sub, cfg in image_subsets.items():
-    print(f"Current image subset: {img_sub}")
-    results = analyze_attention_map_class_separability(
-        metadata_df=metadata_df,
-        models=models_to_compare,
-        sigma=8,
-        target_map_type=cfg['target_map_type'],
-        require_correct_all_models=cfg['require_correct_all_models'],
-        transport_size=(14, 14),  # (14, 14) is the native size of the attention-maps, so no need to downscale.
-        normalize_coordinates=True,
-        clip_negative=True,
-        n_label_permutations=5000,
-        random_state=42,
-        save_dir=cfg['save_dir'],
-        overwrite_pairwise_cache=False,
+if __name__ == "__main__":
+    metadata_df = pd.read_csv(
+        "attention_maps/NATIVE_RESOLUTION/metadata_all_models_native.csv"
     )
 
-# Separability for every image:
-results["per_image"][
-    [
-        "model",
-        "image_id",
-        "true_label",
-        "within_distance",
-        "between_distance",
-        "distance_difference",
-        "distance_ratio",
+    models_to_compare = [
+        "RAF_blur8_pretrained0-8_freeze_fix_projs",
+        "RAF_blur8_freeze",
     ]
-]
 
-# Model-level summary:
-results["model_summary"]
+    image_subsets = {
+        'all_pred':
+            {
+                'target_map_type': 'predicted',
+                'save_dir': "attention_maps/image_attention_separability_sigma8_ALL_PRED",
+                'require_correct_all_models': False,
+            },
+        'all_true':
+            {
+                'target_map_type': 'true',
+                'save_dir': "attention_maps/image_attention_separability_sigma8_ALL_TRUE",
+                'require_correct_all_models': False,
+            },
+        'correct_pred':
+            {
+                'target_map_type': 'predicted',
+                'save_dir': "attention_maps/image_attention_separability_sigma8_CORRECT_PRED",
+                'require_correct_all_models': True,
+            }
+    }
 
-# Per-emotion summary:
-results["emotion_summary"]
+    for img_sub, cfg in image_subsets.items():
+        print(f"Current image subset: {img_sub}")
+        results = analyze_attention_map_class_separability(
+            metadata_df=metadata_df,
+            models=models_to_compare,
+            sigma=8,
+            target_map_type=cfg['target_map_type'],
+            require_correct_all_models=cfg['require_correct_all_models'],
+            transport_size=(14, 14),  # (14, 14) is the native size of the attention-maps, so no need to downscale.
+            normalize_coordinates=True,
+            clip_negative=True,
+            n_label_permutations=5000,
+            random_state=42,
+            save_dir=cfg['save_dir'],
+            overwrite_pairwise_cache=False,
+        )
 
-# Macro-average giving each emotion equal weight:
-results["macro_summary"]
+    # Separability for every image:
+    results["per_image"][
+        [
+            "model",
+            "image_id",
+            "true_label",
+            "within_distance",
+            "between_distance",
+            "distance_difference",
+            "distance_ratio",
+        ]
+    ]
 
-# Label-permutation test:
-results["label_permutation_summary"]
+    # Model-level summary:
+    results["model_summary"]
 
-#
+    # Per-emotion summary:
+    results["emotion_summary"]
+
+    # Macro-average giving each emotion equal weight:
+    results["macro_summary"]
+
+    # Label-permutation test:
+    results["label_permutation_summary"]
+
+    #

@@ -1,40 +1,36 @@
-"""
-26/6/26
-Assumes dataframes "attention_comparisons/wasserstein_{pair}_true_label.csv" from code calc_wasserstein_dist.py, for all
-'pair's in 'dists2comp' below.
-"""
+"""Paired comparison of two distance tables; delta always means A minus B."""
 
 import numpy as np
 import pandas as pd
-from scipy.stats import wilcoxon, ttest_rel
+from scipy.stats import wilcoxon, ttest_1samp
 from pathlib import Path
 
 
-def filter_all_three_correct(
+def _validate_pairs(df, pair_cols):
+    missing = set(pair_cols) - set(df.columns)
+    if missing:
+        raise ValueError(f"Missing pairing columns: {sorted(missing)}")
+    if df[list(pair_cols)].isna().any().any() or df.duplicated(list(pair_cols)).any():
+        raise ValueError("Missing or duplicate pairing keys; select conditions explicitly.")
+
+
+def filter_all_predictions_correct(
     pair_a_df,
     pair_b_df,
     pair_cols=("image_id", "target_label"),
 ):
-    """
-    Keep only paired observations where all three relevant predictions are correct:
+    """Keep keys where both predictions in EACH distance comparison are correct.
 
-        1. mixed model on low-res image
-        2. low-resolution-only model on low-res image
-        3. mixed model on high-res image
-
-    Assumed structure:
-
-    between_models_low_df:
-        correct_a = mixed low correct
-        correct_b = lowres low correct
-
-    within_mixed_low_high_df:
-        correct_a = mixed low correct
-        correct_b = mixed high correct
+    This can involve three or four distinct predictions, depending on inputs.
     """
 
     df_a = pair_a_df.copy()
     df_b = pair_b_df.copy()
+    for frame in (df_a, df_b):
+        _validate_pairs(frame, pair_cols)
+        for col in ("correct_a", "correct_b"):
+            if not frame[col].map(lambda x: isinstance(x, (bool, np.bool_))).all():
+                raise ValueError(f"{col} must contain boolean values.")
 
     # All correct in between-model comparison:
     # mixed low and lowres low
@@ -61,19 +57,23 @@ def filter_all_three_correct(
         )
     )
 
-    filtered_a = df_a.merge(
+    filtered_a = between_all_correct.merge(
         valid_pairs,
         on=list(pair_cols),
         how="inner",
     )
 
-    filtered_b = df_b.merge(
+    filtered_b = within_all_correct.merge(
         valid_pairs,
         on=list(pair_cols),
         how="inner",
     )
 
     return filtered_a, filtered_b, valid_pairs
+
+
+# Compatibility alias for existing notebooks; no assumption of three predictions.
+filter_all_three_correct = filter_all_predictions_correct
 
 
 def prepare_paired_wasserstein_comparison(
@@ -89,17 +89,9 @@ def prepare_paired_wasserstein_comparison(
 
     Parameters
     ----------
-    pair_a_df:
-        DataFrame comparing:
-            mixed model on low-res images
-            vs
-            low-resolution-only model on low-res images
-
-    pair_b_df:
-        DataFrame comparing:
-            mixed model on low-res images
-            vs
-            mixed model on high-res images
+    pair_a_df, pair_b_df:
+        Two distance tables from independently configured map comparisons.
+        Their delta is always distance A minus distance B.
 
     pair_cols:
         Columns used to pair rows across the two analyses.
@@ -122,6 +114,21 @@ def prepare_paired_wasserstein_comparison(
     """
     df_a = pair_a_df.copy()
     df_b = pair_b_df.copy()
+
+    for frame in (df_a, df_b):
+        _validate_pairs(frame, pair_cols)
+        if not np.isfinite(frame[distance_col].to_numpy(dtype=float)).all():
+            raise ValueError("Distances must be finite.")
+        if (frame[distance_col] < 0).any():
+            raise ValueError("Distances must be nonnegative.")
+    for col in ("distance_scale", "transport_height", "transport_width"):
+        if (col in df_a) != (col in df_b):
+            raise ValueError(f"Both inputs must specify {col}, or neither (legacy data).")
+        if col in df_a:
+            values_a = df_a[col].drop_duplicates().tolist()
+            values_b = df_b[col].drop_duplicates().tolist()
+            if len(values_a) != 1 or values_a != values_b:
+                raise ValueError(f"Incompatible {col} values across distance tables.")
 
     keep_a = list(pair_cols) + [distance_col]
     keep_b = list(pair_cols) + [distance_col]
@@ -153,7 +160,11 @@ def prepare_paired_wasserstein_comparison(
         on=list(pair_cols),
         how="inner",
         suffixes=(suffix_a, suffix_b),
+        validate="one_to_one",
     )
+
+    if paired.empty:
+        raise ValueError("No matched distance observations.")
 
     dist_col_a = distance_col + suffix_a
     dist_col_b = distance_col + suffix_b
@@ -181,6 +192,11 @@ def bootstrap_ci(
     values = np.asarray(values, dtype=float)
     values = values[~np.isnan(values)]
 
+    if not values.size or not np.isfinite(values).all():
+        raise ValueError("Bootstrap values must be nonempty and finite.")
+    if n_boot < 1 or not 0 < ci < 100:
+        raise ValueError("n_boot must be positive and ci must lie between 0 and 100.")
+
     n = len(values)
 
     boot_stats = []
@@ -201,87 +217,54 @@ def permutation_sign_flip_test(
     n_perm=100_000,
     random_state=0,
 ):
+    """Monte Carlo sign-flip test of mean(A - B).
+
+    less means distance A is smaller; greater means distance A is larger.
+    Uses bounded batches and a plus-one correction to avoid zero p-values.
     """
-    Paired permutation test using sign flipping.
-
-    Null hypothesis:
-        The paired differences are symmetrically centered around 0.
-
-    Parameters
-    ----------
-    deltas:
-        Paired differences.
-
-    alternative:
-        "less":
-            tests whether mean(delta) < 0
-            meaning within-mixed low/high maps are more similar.
-
-        "greater":
-            tests whether mean(delta) > 0
-            meaning within-mixed low/high maps are less similar.
-
-        "two-sided":
-            tests whether mean(delta) != 0.
-
-    Returns
-    -------
-    p_value
-    """
-    rng = np.random.default_rng(random_state)
-
+    if alternative not in ("less", "greater", "two-sided"):
+        raise ValueError("alternative must be less, greater, or two-sided")
     deltas = np.asarray(deltas, dtype=float)
-    deltas = deltas[~np.isnan(deltas)]
-
-    observed = np.mean(deltas)
-
-    signs = rng.choice([-1, 1], size=(n_perm, len(deltas)))
-    permuted = signs * deltas[None, :]
-    permuted_stats = permuted.mean(axis=1)
-
-    if alternative == "less":
-        p = np.mean(permuted_stats <= observed)
-    elif alternative == "greater":
-        p = np.mean(permuted_stats >= observed)
-    elif alternative == "two-sided":
-        p = np.mean(np.abs(permuted_stats) >= abs(observed))
-    else:
-        raise ValueError("alternative must be 'less', 'greater', or 'two-sided'")
-
-    return float(p)
+    if not deltas.size or not np.isfinite(deltas).all():
+        raise ValueError("Differences must be nonempty and finite.")
+    if n_perm < 1:
+        raise ValueError("n_perm must be positive.")
+    rng = np.random.default_rng(random_state)
+    observed = deltas.mean()
+    count = 0
+    batch_size = max(1, min(1000, 1_000_000 // len(deltas)))
+    for start in range(0, n_perm, batch_size):
+        signs = rng.choice([-1, 1], size=(min(batch_size, n_perm - start), len(deltas)))
+        stats = (signs * deltas).mean(axis=1)
+        if alternative == "less":
+            count += np.count_nonzero(stats <= observed)
+        elif alternative == "greater":
+            count += np.count_nonzero(stats >= observed)
+        else:
+            count += np.count_nonzero(np.abs(stats) >= abs(observed))
+    return float((count + 1) / (n_perm + 1))
 
 
 def paired_wasserstein_tests(
     paired_df: pd.DataFrame,
     delta_col="delta_a_minus_b",
-    alternative="less",
+    alternative="two-sided",
     n_boot=10_000,
     n_perm=100_000,
     random_state=0,
 ):
-    """
-    Run paired tests on Wasserstein distance differences.
+    """Test paired delta = distance A - distance B.
 
-    delta = within_mixed_low_high - between_models_low
-
-    alternative="less":
-        Tests whether delta < 0.
-        This means mixed low/high maps are MORE similar to each other.
-
-    alternative="greater":
-        Tests whether delta > 0.
-        This means mixed low/high maps are LESS similar to each other.
-
-    alternative="two-sided":
-        Tests whether the two distances differ.
+    less: A is smaller; greater: A is larger; two-sided: they differ.
     """
     deltas = paired_df[delta_col].to_numpy(dtype=float)
-    deltas = deltas[~np.isnan(deltas)]
+    if not np.isfinite(deltas).all():
+        raise ValueError("Differences must be finite.")
 
     n = len(deltas)
 
-    if n == 0:
-        raise ValueError("No paired observations available.")
+    if n < 2:
+        raise ValueError("At least two paired observations are required.")
 
     mean_delta = np.mean(deltas)
     median_delta = np.median(deltas)
@@ -290,20 +273,13 @@ def paired_wasserstein_tests(
     # Cohen's dz for paired designs
     cohens_dz = mean_delta / sd_delta if sd_delta > 0 else np.nan
 
-    # Wilcoxon signed-rank test
-    wilcoxon_result = wilcoxon(
-        deltas,
-        alternative=alternative,
-        zero_method="wilcox",
-    )
-
-    # Paired t-test against 0
-    ttest_result = ttest_rel(
-        paired_df[delta_col],
-        np.zeros(len(paired_df)),
-        alternative=alternative,
-        nan_policy="omit",
-    )
+    from types import SimpleNamespace
+    if np.all(deltas == 0):
+        wilcoxon_result = SimpleNamespace(statistic=0.0, pvalue=1.0)
+        ttest_result = SimpleNamespace(statistic=0.0, pvalue=1.0)
+    else:
+        wilcoxon_result = wilcoxon(deltas, alternative=alternative, zero_method="wilcox")
+        ttest_result = ttest_1samp(deltas, 0, alternative=alternative)
 
     mean_ci = bootstrap_ci(
         deltas,
@@ -353,57 +329,29 @@ def paired_wasserstein_tests(
     return pd.DataFrame([results])
 
 
-# dists2comp = ['RAFblur8pretrained08freezefixprojs_vs_RAFblur8freeze',  # between models on low-res images
-#               'RAFblur8pretrained08freezefixprojs_vs_RAFblur0pretrained08freeze']  # within mixed model, between image resolutions.
-
-# Comparisons with high-res model, using native-resolution maps:
-dists2comp = ['RAFblur8pretrained08freezefixprojs_vs_RAFblur8freeze_native',  # between models (variable vs unifrom) on low-res images
-              'RAFblur0pretrained08freeze_vs_RAFblur0freeze_native']  # between models (variable vs unifrom) on high-res images.
-
-work_dir = 'attention_comparisons/comp_high_low_native'
-target_mode = 'true_label'
-
-pair_a_df = pd.read_csv(f"{work_dir}/wasserstein_{dists2comp[0]}_{target_mode}.csv")
-pair_b_df = pd.read_csv(f"{work_dir}/wasserstein_{dists2comp[1]}_{target_mode}.csv")
-
-all3_df_a, all3_df_b, valid_pairs = filter_all_three_correct(
-    pair_a_df=pair_a_df,
-    pair_b_df=pair_b_df,
-    pair_cols=("image_id", "target_label"),
-)
-
-print("Between-model rows before:", len(pair_a_df))
-print("Within-mixed rows before:", len(pair_b_df))
-print("Between-model rows after:", len(all3_df_a))
-print("Within-mixed rows after:", len(all3_df_b))
-print("Valid image/target pairs:", len(valid_pairs))
+def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="Compare two paired Wasserstein distance tables; delta = A - B.")
+    parser.add_argument("distance_a", type=Path)
+    parser.add_argument("distance_b", type=Path)
+    parser.add_argument("--output-dir", required=True, type=Path)
+    parser.add_argument("--all-correct", action="store_true", help="Require every prediction in both comparisons to be correct")
+    parser.add_argument("--pair-cols", nargs="+", default=["image_id", "target_label"])
+    parser.add_argument("--alternative", choices=["less", "greater", "two-sided"], default="two-sided")
+    parser.add_argument("--n-perm", type=int, default=100_000)
+    parser.add_argument("--n-boot", type=int, default=10_000)
+    args = parser.parse_args()
+    a, b = pd.read_csv(args.distance_a), pd.read_csv(args.distance_b)
+    if args.all_correct:
+        a, b, _ = filter_all_predictions_correct(a, b, args.pair_cols)
+    paired = prepare_paired_wasserstein_comparison(a, b, args.pair_cols)
+    tests = paired_wasserstein_tests(paired, alternative=args.alternative,
+                                      n_perm=args.n_perm, n_boot=args.n_boot)
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    paired.to_csv(args.output_dir / "paired_distances.csv", index=False)
+    tests.to_csv(args.output_dir / "paired_tests.csv", index=False)
+    print(tests.to_string(index=False))
 
 
-paired_df_all3_correct = prepare_paired_wasserstein_comparison(
-    pair_a_df=all3_df_a,
-    pair_b_df=all3_df_b,
-    pair_cols=("image_id", "target_label"),
-    distance_col="wasserstein_distance",
-)
-
-test_results = paired_wasserstein_tests(
-    paired_df_all3_correct,
-    alternative="two-sided",
-    n_boot=10_000,
-    n_perm=100_000,
-    random_state=0,
-)
-
-test_results
-
-Path(work_dir).mkdir(exist_ok=True)
-
-paired_df_all3_correct.to_csv(
-    f"{work_dir}/paired_wasserstein_comparison_all3_correct.csv",
-    index=False,
-)
-
-test_results.to_csv(
-    f"{work_dir}/paired_wasserstein_test_results_all3_correct.csv",
-    index=False,
-)
+if __name__ == "__main__":
+    main()

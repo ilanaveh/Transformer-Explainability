@@ -1,16 +1,10 @@
-"""
-25/5/26
-Assumes file "attention_maps/metadata_all_models.csv" contains df with maps for all models in 'models2comp' below.
-(dfs were created by create_attn_maps.py).
-"""
+"""Compare matched image relevance maps; run with --help for CLI usage."""
 
 from __future__ import annotations
 
 from pathlib import Path
 import numpy as np
 import pandas as pd
-import torch
-import torch.nn.functional as F
 from tqdm import tqdm
 
 
@@ -18,240 +12,40 @@ from tqdm import tqdm
 # 1. Map utilities
 # ============================================================
 
-def load_attention_map(path: str | Path) -> np.ndarray:
-    """
-    Load a saved attention/relevance map from .npy.
-
-    Expected shape:
-        [H, W] or [1, H, W]
-    """
-    arr = np.load(path)
-
-    if arr.ndim == 3:
-        if arr.shape[0] == 1:
-            arr = arr[0]
-        else:
-            raise ValueError(f"Unexpected 3D map shape: {arr.shape}")
-
-    if arr.ndim != 2:
-        raise ValueError(f"Expected 2D map, got shape: {arr.shape}")
-
-    return arr.astype(np.float64)
+if __package__:
+    from .wasserstein import (load_attention_map, normalize_map, resize_map,
+                              prepare_map, make_2d_cost_matrix, wasserstein_distance_2d)
+else:
+    from wasserstein import (load_attention_map, normalize_map, resize_map,
+                             prepare_map, make_2d_cost_matrix, wasserstein_distance_2d)
 
 
-def normalize_map(
-    x: np.ndarray,
-    eps: float = 1e-12,
-    clip_negative: bool = True,
-) -> np.ndarray:
-    """
-    Convert attention/relevance map into a probability distribution.
+def preprocess_map_for_wasserstein(path, output_size=None, clip_negative=True):
+    return prepare_map(load_attention_map(path), output_size, clip_negative)
 
-    Required before Wasserstein comparison.
-    """
-    x = np.asarray(x, dtype=np.float64)
-
-    if clip_negative:
-        x = np.maximum(x, 0)
-
-    total = x.sum()
-
-    if total < eps:
-        return np.zeros_like(x, dtype=np.float64)
-
-    return x / total
-
-
-def resize_map(
-    x: np.ndarray,
-    output_size: tuple[int, int],
-) -> np.ndarray:
-    """
-    Resize a 2D map using torch bilinear interpolation.
-    """
-    x = np.asarray(x, dtype=np.float64)
-
-    tensor = torch.tensor(x, dtype=torch.float32)[None, None, :, :]
-
-    resized = F.interpolate(
-        tensor,
-        size=output_size,
-        mode="bilinear",
-        align_corners=False,
-    )
-
-    return resized[0, 0].cpu().numpy().astype(np.float64)
-
-
-def preprocess_map_for_wasserstein(
-    path: str | Path,
-    output_size: tuple[int, int] = (32, 32),
-    clip_negative: bool = True,
-) -> np.ndarray:
-    """
-    Load, resize, and normalize an attention map.
-
-    For Wasserstein, downsampling is strongly recommended because exact
-    optimal transport becomes expensive at high resolution.
-
-    Example:
-        32 x 32 = 1024 spatial bins
-        64 x 64 = 4096 spatial bins, much slower
-    """
-    x = load_attention_map(path)
-    x = resize_map(x, output_size)
-    x = normalize_map(x, clip_negative=clip_negative)
-    return x
-
-
-# ============================================================
-# 2. Wasserstein / EMD distance
-# ============================================================
-
-def make_2d_cost_matrix(
-    height: int,
-    width: int,
-    normalize_cost: bool = True,
-) -> np.ndarray:
-    """
-    Create pairwise Euclidean distance matrix between all pixels/patches.
-
-    For a 32x32 map:
-        cost matrix shape = [1024, 1024]
-    """
-    ys, xs = np.meshgrid(
-        np.arange(height),
-        np.arange(width),
-        indexing="ij",
-    )
-
-    coords = np.stack([ys.ravel(), xs.ravel()], axis=1).astype(np.float64)
-
-    diff = coords[:, None, :] - coords[None, :, :]
-    cost = np.sqrt((diff ** 2).sum(axis=-1))
-
-    if normalize_cost:
-        max_cost = cost.max()
-        if max_cost > 0:
-            cost = cost / max_cost
-
-    return cost
-
-
-def wasserstein_distance_2d(
-    map_a: np.ndarray,
-    map_b: np.ndarray,
-    cost_matrix: np.ndarray | None = None,
-    normalize_cost: bool = True,
-) -> float:
-    """
-    Compute exact 2D Wasserstein / Earth Mover's Distance.
-
-    Parameters
-    ----------
-    map_a, map_b:
-        2D non-negative maps, ideally already normalized to sum to 1.
-
-    cost_matrix:
-        Optional precomputed cost matrix for speed.
-
-    Returns
-    -------
-    emd:
-        Wasserstein / EMD distance.
-    """
-    import ot
-
-    map_a = normalize_map(map_a)
-    map_b = normalize_map(map_b)
-
-    if map_a.shape != map_b.shape:
-        raise ValueError(f"Shape mismatch: {map_a.shape} vs {map_b.shape}")
-
-    h, w = map_a.shape
-
-    if cost_matrix is None:
-        cost_matrix = make_2d_cost_matrix(
-            height=h,
-            width=w,
-            normalize_cost=normalize_cost,
-        )
-
-    a = map_a.ravel()
-    b = map_b.ravel()
-
-    emd = ot.emd2(a, b, cost_matrix)
-
-    return float(emd)
-
-
-# ============================================================
-# 3. Pair maps from two models and compare with Wasserstein
-# ============================================================
 
 def compare_models_wasserstein(
     df: pd.DataFrame,
     model_a: str,
     model_b: str,
-    output_size: tuple[int, int] = (32, 32),
+    output_size: tuple[int, int] | None = None,
     target_mode: str = "true_label",
     require_same_prediction_status: bool = False,
     clip_negative: bool = True,
     normalize_cost: bool = True,
+    sigma_a: float | None = None,
+    sigma_b: float | None = None,
+    map_root: str | Path | None = None,
 ) -> pd.DataFrame:
-    """
-    Compare attention maps between two models using 2D Wasserstein distance.
+    """Compare maps paired by image, target, and sigma.
 
-    The function pairs maps by:
-        image_id, sigma, target_label
-
-    Parameters
-    ----------
-    df:
-        Metadata dataframe from merge_metadata_files.
-
-    model_a, model_b:
-        Names of the two models to compare.
-
-    output_size:
-        Spatial size used for Wasserstein comparison.
-        Recommended: (32, 32) or (48, 48).
-        Larger is slower.
-
-    target_mode:
-        Which maps to compare.
-
-        "true_label":
-            Compare maps where target_label == true_label.
-            This asks:
-                Do the models allocate true-class relevance differently?
-
-        "pred_label":
-            Compare maps where target_label == pred_label.
-            This asks:
-                Do the models allocate relevance differently for their own decisions?
-
-            Note: if models predict different classes, the target_label may differ,
-            so fewer pairs may be available unless both predictions match.
-
-        "all":
-            Use all available target_label maps.
-
-    require_same_prediction_status:
-        If True, only compare images where both models are either correct or incorrect.
-        Usually False is better.
-
-    clip_negative:
-        Clip negative relevance before normalization.
-
-    normalize_cost:
-        If True, Wasserstein distance is normalized by image diagonal,
-        so values are roughly in [0, 1].
-
-    Returns
-    -------
-    results_df:
-        One row per paired map comparison.
+    To compare different conditions, supply BOTH sigma_a and sigma_b;
+    pairing then uses image and target after condition selection.
+    Duplicate keys, invalid maps, and empty selections raise errors.
+    Native resolution is preserved unless output_size is supplied.
+    Relative paths are resolved against map_root (cwd by default).
+    pred_label mode only pairs models predicting the same target class.
+    Normalized distances use diagonal units, in [0, 1].
     """
     required_cols = {
         "image_id",
@@ -282,25 +76,30 @@ def compare_models_wasserstein(
     df_a = work[work["model"] == model_a].copy()
     df_b = work[work["model"] == model_b].copy()
 
-    # Pair maps from model A and model B.
+    if (sigma_a is None) != (sigma_b is None):
+        raise ValueError("Supply both sigma_a and sigma_b, or neither.")
     pair_cols = ["image_id", "target_label"]
-
-    paired = df_a.merge(
-        df_b,
-        on=pair_cols,
-        suffixes=("_a", "_b"),
-        how="inner",
-    )
-
+    if sigma_a is not None:
+        df_a = df_a[df_a["sigma"] == sigma_a]
+        df_b = df_b[df_b["sigma"] == sigma_b]
+    else:
+        pair_cols.append("sigma")
+    for name, frame in (("A", df_a), ("B", df_b)):
+        if frame.empty:
+            raise ValueError(f"No maps selected for model {name}.")
+        if frame[pair_cols].isna().any().any() or frame.duplicated(pair_cols).any():
+            raise ValueError(f"Missing or duplicate pairing keys for model {name}: {pair_cols}")
+        if not frame["correct"].map(lambda x: isinstance(x, (bool, np.bool_))).all():
+            raise ValueError("correct must contain boolean values.")
+    paired = df_a.merge(df_b, on=pair_cols, suffixes=("_a", "_b"),
+                           how="inner", validate="one_to_one")
     if require_same_prediction_status:
         paired = paired[paired["correct_a"] == paired["correct_b"]]
-
-    h, w = output_size
-    cost_matrix = make_2d_cost_matrix(
-        height=h,
-        width=w,
-        normalize_cost=normalize_cost,
-    )
+    if paired.empty:
+        raise ValueError("No matched maps remain after selection.")
+    if not (paired["true_label_a"] == paired["true_label_b"]).all():
+        raise ValueError("Matched images have conflicting true labels.")
+    map_root = Path(map_root) if map_root is not None else Path.cwd()
 
     rows = []
 
@@ -311,13 +110,13 @@ def compare_models_wasserstein(
     ):
         try:
             map_a = preprocess_map_for_wasserstein(
-                row["map_path_a"],
+                map_root / row["map_path_a"],
                 output_size=output_size,
                 clip_negative=clip_negative,
             )
 
             map_b = preprocess_map_for_wasserstein(
-                row["map_path_b"],
+                map_root / row["map_path_b"],
                 output_size=output_size,
                 clip_negative=clip_negative,
             )
@@ -325,7 +124,6 @@ def compare_models_wasserstein(
             emd = wasserstein_distance_2d(
                 map_a,
                 map_b,
-                cost_matrix=cost_matrix,
                 normalize_cost=normalize_cost,
             )
 
@@ -336,8 +134,8 @@ def compare_models_wasserstein(
                 "model_a": model_a,
                 "model_b": model_b,
 
-                "sigma_a": row["sigma_a"],
-                "sigma_b": row["sigma_b"],
+                "sigma_a": row.get("sigma_a", row.get("sigma")),
+                "sigma_b": row.get("sigma_b", row.get("sigma")),
 
                 "true_label_a": row["true_label_a"],
                 "true_label_b": row["true_label_b"],
@@ -355,111 +153,47 @@ def compare_models_wasserstein(
                 "true_confidence_b": row.get("true_confidence_b", np.nan),
 
                 "wasserstein_distance": emd,
+                "distance_scale": "diagonal" if normalize_cost else "grid_pixels",
+                "transport_height": map_a.shape[0],
+                "transport_width": map_a.shape[1],
 
-                "map_path_a": row["map_path_a"],
-                "map_path_b": row["map_path_b"],
+                "map_path_a": map_root / row["map_path_a"],
+                "map_path_b": map_root / row["map_path_b"],
             })
 
-        except Exception as exc:
-            print(
-                f"Skipping image_id={row['image_id']}, "
-                f"target={row['target_label']} because: {exc}"
-            )
+        except (ValueError, OSError) as exc:
+            raise ValueError(
+                f"Cannot compare image_id={row['image_id']}, "
+                f"target={row['target_label']}: {exc}"
+            ) from exc
 
     return pd.DataFrame(rows)
 
 
-# ============================================================
-# 3. Pair maps from two models and compare with Wasserstein
-# ============================================================
-models2comp = ['RAF_blur0_pretrained0-8_freeze',
-               'RAF_blur0_freeze']
 
-tar_mode = 'true_label'
-
-df = pd.read_csv("attention_maps/NATIVE_RESOLUTION/metadata_all_models_native.csv")
-
-wasserstein_df = compare_models_wasserstein(
-    df=df,
-    model_a=models2comp[0],
-    model_b=models2comp[1],
-    output_size=(32, 32),
-    target_mode=tar_mode,
-    require_same_prediction_status=False,
-    clip_negative=True,
-    normalize_cost=True,
-)
-
-wasserstein_df.to_csv(
-    f"attention_comparisons/wasserstein_"
-    f"{models2comp[0].replace('_','').replace('-','')}_vs_{models2comp[1].replace('_','').replace('-','')}_"
-    "native_"
-    f"{tar_mode}.csv",
-    index=False,
-)
-
-wasserstein_df.head()
-
-# ============================================================
-# Summaries
-# ============================================================
-
-# ============================================================
-# 1. compare emotions
-# ============================================================
-
-summary_by_emotion = (
-    wasserstein_df
-    .groupby("target_label")
-    .agg(
-        mean_wasserstein=("wasserstein_distance", "mean"),
-        median_wasserstein=("wasserstein_distance", "median"),
-        std_wasserstein=("wasserstein_distance", "std"),
-        n=("wasserstein_distance", "size"),
+def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="Calculate matched spatial Wasserstein-1 distances.")
+    parser.add_argument("metadata", type=Path)
+    parser.add_argument("--model-a", required=True)
+    parser.add_argument("--model-b", required=True)
+    parser.add_argument("--sigma-a", type=float)
+    parser.add_argument("--sigma-b", type=float)
+    parser.add_argument("--size", nargs=2, type=int, metavar=("HEIGHT", "WIDTH"))
+    parser.add_argument("--target-mode", choices=["true_label", "pred_label", "all"], default="true_label")
+    parser.add_argument("--map-root", type=Path, help="Root of relative map paths; default: metadata directory")
+    parser.add_argument("--output", type=Path, required=True)
+    args = parser.parse_args()
+    result = compare_models_wasserstein(
+        pd.read_csv(args.metadata), args.model_a, args.model_b,
+        output_size=args.size, target_mode=args.target_mode,
+        sigma_a=args.sigma_a, sigma_b=args.sigma_b,
+        map_root=args.map_root or args.metadata.resolve().parent,
     )
-    .reset_index()
-)
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    result.to_csv(args.output, index=False)
+    print(f"Saved {len(result)} distances to {args.output}")
 
-summary_by_emotion
 
-# ============================================================
-# 2. Only A-correct, B-wrong
-# ============================================================
-a_correct_b_wrong = wasserstein_df[
-    (wasserstein_df["correct_a"] == True) &
-    (wasserstein_df["correct_b"] == False)
-].copy()
-
-summary_a_correct_b_wrong = (
-    a_correct_b_wrong
-    .groupby("target_label")
-    .agg(
-        mean_wasserstein=("wasserstein_distance", "mean"),
-        median_wasserstein=("wasserstein_distance", "median"),
-        n=("wasserstein_distance", "size"),
-    )
-    .reset_index()
-)
-
-summary_a_correct_b_wrong
-
-# ============================================================
-# 3. Only mixed-correct, lowres-correct
-# ============================================================
-both_correct = wasserstein_df[
-    (wasserstein_df["correct_a"] == True) &
-    (wasserstein_df["correct_b"] == True)
-].copy()
-
-summary_both_correct = (
-    both_correct
-    .groupby("target_label")
-    .agg(
-        mean_wasserstein=("wasserstein_distance", "mean"),
-        median_wasserstein=("wasserstein_distance", "median"),
-        n=("wasserstein_distance", "size"),
-    )
-    .reset_index()
-)
-
-summary_both_correct
+if __name__ == "__main__":
+    main()

@@ -339,24 +339,25 @@ def plot_delta_hist(
     }
 
 
-paired_df_all3_correct = pd.read_csv('attention_comparisons/comp_high_low_native/paired_wasserstein_comparison_all3_correct.csv')
+if __name__ == "__main__":
+    paired_df_all3_correct = pd.read_csv('attention_comparisons/comp_high_low_native/paired_wasserstein_comparison_all3_correct.csv')
 
-plot_stats = plot_paired_wasserstein_all3_correct(
-    paired_df_all3_correct,
-    dist_a_col='wasserstein_distance_a',
-    dist_b_col='wasserstein_distance_b',
-    label_a='mixed_vs_uniform_lowres',
-    label_b='mixed_vs_uniform_hires',
-    output_path="figures/paired_wasserstein_all3_correct_high_vs_low.png",
-)
+    plot_stats = plot_paired_wasserstein_all3_correct(
+        paired_df_all3_correct,
+        dist_a_col='wasserstein_distance_a',
+        dist_b_col='wasserstein_distance_b',
+        label_a='mixed_vs_uniform_lowres',
+        label_b='mixed_vs_uniform_hires',
+        output_path="figures/paired_wasserstein_all3_correct_high_vs_low.png",
+    )
 
-plot_stats
+    plot_stats
 
-stats = plot_delta_hist(
-    paired_df_all3_correct,
-    delta_col="delta_a_minus_b",
-    output_path="figures/delta_wasserstein_all3_correct_high_vs_low.png",
-    bin_width=0.02,  # adjust to your Wasserstein scale
-)
+    stats = plot_delta_hist(
+        paired_df_all3_correct,
+        delta_col="delta_a_minus_b",
+        output_path="figures/delta_wasserstein_all3_correct_high_vs_low.png",
+        bin_width=0.02,  # adjust to your Wasserstein scale
+    )
 
-stats
+    stats
