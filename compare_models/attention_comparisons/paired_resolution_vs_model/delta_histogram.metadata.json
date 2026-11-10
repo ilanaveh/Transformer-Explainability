@@ -1,0 +1,48 @@
+{
+  "source_paired_csv": "C:\\Users\\ilana\\Documents\\Zohary\\Faces\\github_projects\\Transformer-Explainability\\compare_models\\attention_comparisons\\paired_resolution_vs_model\\paired_distances.csv",
+  "n_pairs_analyzed": 3068,
+  "delta_column": "delta_a_minus_b",
+  "delta_definition": "distance A minus distance B",
+  "negative_values": "Distance A is smaller: attention maps in comparison A are more similar.",
+  "positive_values": "Distance B is smaller: attention maps in comparison B are more similar.",
+  "comparisons": {
+    "A": {
+      "source_distance_csv": "C:\\Users\\ilana\\Documents\\Zohary\\Faces\\github_projects\\Transformer-Explainability\\compare_models\\attention_comparisons\\wasserstein_runs\\mixed_blur8_vs_blur0_pred_label\\distances.csv",
+      "conditions": [
+        {
+          "model_a": "RAF_blur0_pretrained0-8_freeze",
+          "sigma_a": 0,
+          "model_b": "RAF_blur8_pretrained0-8_freeze_fix_projs",
+          "sigma_b": 8
+        }
+      ]
+    },
+    "B": {
+      "source_distance_csv": "C:\\Users\\ilana\\Documents\\Zohary\\Faces\\github_projects\\Transformer-Explainability\\compare_models\\attention_comparisons\\wasserstein_runs\\mixed_vs_low_blur8_pred_label\\distances.csv",
+      "conditions": [
+        {
+          "model_a": "RAF_blur8_freeze",
+          "sigma_a": 8,
+          "model_b": "RAF_blur8_pretrained0-8_freeze_fix_projs",
+          "sigma_b": 8
+        }
+      ]
+    }
+  },
+  "pairing": {},
+  "plot_options": {
+    "xlabel": "Wasserstein distance difference (across resolutions minus across models)",
+    "title": null,
+    "bin_width": null
+  },
+  "statistics": {
+    "n": 3068,
+    "mean_delta": -0.020735765827220552,
+    "median_delta": -0.0203644694014463,
+    "mean_ci_low": -0.021583015838700172,
+    "mean_ci_high": -0.01987560746032286,
+    "percent_delta_less_than_zero": 82.17079530638853,
+    "output_path_png": "compare_models\\attention_comparisons\\paired_resolution_vs_model\\delta_histogram.png",
+    "output_path_pdf": "compare_models\\attention_comparisons\\paired_resolution_vs_model\\delta_histogram.pdf"
+  }
+}

@@ -1,0 +1,2 @@
+n_pairs,mean_delta,median_delta,sd_delta,cohens_dz,mean_delta_ci_low,mean_delta_ci_high,median_delta_ci_low,median_delta_ci_high,wilcoxon_statistic,wilcoxon_p,paired_t_statistic,paired_t_p,permutation_p,alternative
+3068,-0.02073576582722057,-0.02036446940144635,0.02439458825950747,-0.8500149954012476,-0.021583015838700193,-0.01987560746032288,-0.021388115882199098,-0.019390466219267048,511467.0,1.461924978242576e-308,-47.08193083025189,0.0,9.99990000099999e-06,two-sided

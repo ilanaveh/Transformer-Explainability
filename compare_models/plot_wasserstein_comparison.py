@@ -200,7 +200,8 @@ def plot_delta_hist(
     dpi=600,
     show_mean=False,
     show_median=False,
-    show_ann=False
+    show_ann=False,
+    show=True,
 ):
     """
     histogram for paired Wasserstein-distance deltas.
@@ -274,7 +275,7 @@ def plot_delta_hist(
     if xlabel is None:
         xlabel = (
             "Δ Wasserstein distance\n"
-            "(mixed–vs-uniform-lowres minus mixed–vs-uniform-hires)"
+            "(distance A minus distance B)"
         )
 
     ax.set_title(title, fontsize=11, pad=10)
@@ -305,11 +306,8 @@ def plot_delta_hist(
             ),
         )
 
-    ax.legend(
-        frameon=False,
-        fontsize=8,
-        loc="upper left",
-    )
+    if show_mean or show_median:
+        ax.legend(frameon=False, fontsize=8, loc="upper left")
 
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
@@ -325,7 +323,10 @@ def plot_delta_hist(
         plt.savefig(output_path, dpi=dpi, bbox_inches="tight")
         plt.savefig(output_path.with_suffix(".pdf"), bbox_inches="tight")
 
-    plt.show()
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
 
     return {
         "n": n,
@@ -339,25 +340,79 @@ def plot_delta_hist(
     }
 
 
-if __name__ == "__main__":
-    paired_df_all3_correct = pd.read_csv('attention_comparisons/comp_high_low_native/paired_wasserstein_comparison_all3_correct.csv')
+def main():
+    import argparse
 
-    plot_stats = plot_paired_wasserstein_all3_correct(
-        paired_df_all3_correct,
-        dist_a_col='wasserstein_distance_a',
-        dist_b_col='wasserstein_distance_b',
-        label_a='mixed_vs_uniform_lowres',
-        label_b='mixed_vs_uniform_hires',
-        output_path="figures/paired_wasserstein_all3_correct_high_vs_low.png",
+    parser = argparse.ArgumentParser(
+        description="Plot paired Wasserstein differences from comp_wasserstein_dist output. Negative values mean distance A is smaller."
     )
-
-    plot_stats
-
+    parser.add_argument("paired_csv", type=Path, help="Path to paired_distances.csv")
+    parser.add_argument("--output", type=Path, help="PNG path; default: delta_histogram.png beside the input. A PDF is also saved.")
+    parser.add_argument("--delta-col", default="delta_a_minus_b")
+    parser.add_argument("--distance-a", type=Path, help="Original distance table A (for older paired outputs without provenance)")
+    parser.add_argument("--distance-b", type=Path, help="Original distance table B (for older paired outputs without provenance)")
+    parser.add_argument("--title")
+    parser.add_argument("--xlabel", default="Wasserstein distance difference\n(distance A minus distance B)")
+    parser.add_argument("--bin-width", type=float)
+    parser.add_argument("--show-mean", action="store_true")
+    parser.add_argument("--show-median", action="store_true")
+    parser.add_argument("--show-ann", action="store_true")
+    parser.add_argument("--no-show", action="store_true", help="Save without opening a plot window")
+    args = parser.parse_args()
+    if args.no_show:
+        plt.switch_backend("Agg")
+    if args.bin_width is not None and args.bin_width <= 0:
+        parser.error("--bin-width must be positive")
+    df = pd.read_csv(args.paired_csv)
+    if args.delta_col not in df.columns:
+        parser.error(f"Missing column: {args.delta_col}")
+    output = args.output or args.paired_csv.with_name("delta_histogram.png")
     stats = plot_delta_hist(
-        paired_df_all3_correct,
-        delta_col="delta_a_minus_b",
-        output_path="figures/delta_wasserstein_all3_correct_high_vs_low.png",
-        bin_width=0.02,  # adjust to your Wasserstein scale
+        df, delta_col=args.delta_col, output_path=output,
+        bin_width=args.bin_width, title=args.title, xlabel=args.xlabel,
+        show_mean=args.show_mean, show_median=args.show_median,
+        show_ann=args.show_ann, show=not args.no_show,
     )
+    import json
+    provenance_path = args.paired_csv.with_suffix(".metadata.json")
+    provenance = json.loads(provenance_path.read_text(encoding="utf-8")) if provenance_path.exists() else {}
+    comparisons = {}
+    for side, supplied_path in (("a", args.distance_a), ("b", args.distance_b)):
+        source = supplied_path or provenance.get(f"distance_{side}")
+        fields = ["model_a", "sigma_a", "model_b", "sigma_b"]
+        columns = [f"{field}_{side}" for field in fields]
+        if all(col in df for col in columns):
+            conditions = df[columns].drop_duplicates().rename(columns=dict(zip(columns, fields)))
+        elif source:
+            original = pd.read_csv(source)
+            # Include only images that contributed a plotted difference.
+            original = original[original.image_id.isin(df.loc[df[args.delta_col].notna(), "image_id"])]
+            conditions = original[[field for field in fields if field in original]].drop_duplicates()
+        else:
+            conditions = None
+        comparisons[side.upper()] = {
+            "source_distance_csv": str(Path(source).resolve()) if source else None,
+            "conditions": json.loads(conditions.to_json(orient="records")) if conditions is not None else None,
+        }
+    metadata = {
+        "source_paired_csv": str(args.paired_csv.resolve()),
+        "n_pairs_analyzed": int(stats["n"]),
+        "delta_column": args.delta_col,
+        "delta_definition": "distance A minus distance B" if args.delta_col == "delta_a_minus_b" else "Custom column; sign interpretation must be supplied by its creator",
+        "negative_values": "Distance A is smaller: attention maps in comparison A are more similar." if args.delta_col == "delta_a_minus_b" else None,
+        "positive_values": "Distance B is smaller: attention maps in comparison B are more similar." if args.delta_col == "delta_a_minus_b" else None,
+        "comparisons": comparisons,
+        "pairing": provenance,
+        "plot_options": {"xlabel": args.xlabel, "title": args.title, "bin_width": args.bin_width},
+        "statistics": stats,
+    }
+    metadata_path = output.with_suffix(".metadata.json")
+    metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+    if any(item["conditions"] is None for item in comparisons.values()):
+        print("Model/blur information unavailable: pass --distance-a and --distance-b for legacy paired CSVs.")
+    print(f"Saved metadata: {metadata_path}")
+    print(f"Saved {stats['output_path_png']} and {stats['output_path_pdf']}")
 
-    stats
+
+if __name__ == "__main__":
+    main()

@@ -142,6 +142,10 @@ def prepare_paired_wasserstein_comparison(
         "pred_label_a",
         "pred_label_b",
         "sigma",
+        "model_a",
+        "model_b",
+        "sigma_a",
+        "sigma_b",
     ]
 
     for col in optional_cols:
@@ -350,6 +354,17 @@ def main():
     args.output_dir.mkdir(parents=True, exist_ok=True)
     paired.to_csv(args.output_dir / "paired_distances.csv", index=False)
     tests.to_csv(args.output_dir / "paired_tests.csv", index=False)
+    import json
+    provenance = {
+        "distance_a": str(args.distance_a.resolve()),
+        "distance_b": str(args.distance_b.resolve()),
+        "pair_cols": args.pair_cols,
+        "all_correct": args.all_correct,
+        "delta_definition": "distance A minus distance B",
+    }
+    (args.output_dir / "paired_distances.metadata.json").write_text(
+        json.dumps(provenance, indent=2), encoding="utf-8"
+    )
     print(tests.to_string(index=False))
 
 
